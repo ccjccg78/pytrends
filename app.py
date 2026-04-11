@@ -10,9 +10,28 @@ from pytrends.exceptions import TooManyRequestsError, ResponseError
 
 st.set_page_config(page_title="热点关键词趋势追踪", page_icon="🔥", layout="wide")
 
+# 隐藏右上角英文菜单
+st.markdown("""
+<style>
+#MainMenu {visibility: hidden;}
+header {visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
+
 # ── 左侧边栏设置 ──────────────────────────────────────────────
 with st.sidebar:
     st.header("⚙ 查询设置")
+
+    track_freq = st.selectbox("追踪频率", [
+        ("每天 1 次", "daily_1"),
+        ("每天 2 次", "daily_2"),
+        ("每周 1 次", "weekly_1"),
+        ("每周 2 次", "weekly_2"),
+        ("每周 3 次", "weekly_3"),
+        ("仅手动执行", "manual"),
+    ], format_func=lambda x: x[0], index=0)
+
+    st.divider()
 
     geo = st.selectbox("主要地区", [
         ("全球", ""),
@@ -139,7 +158,6 @@ if start and total_kw > 0:
                     geo=geo[1],
                 )
                 result = pytrend.related_queries()
-
                 if kw in result and result[kw]['rising'] is not None:
                     rising_df = result[kw]['rising'].copy()
                     rising_df['keyword'] = kw
@@ -152,7 +170,6 @@ if start and total_kw > 0:
                 wait = 60 + retry_count * 30 + random.randint(0, 10)
                 status_area.warning(f"⚠️ 触发限流 (429)，等待 {wait} 秒后重试... ({retry_count}/{max_retries})")
                 time.sleep(wait)
-                # 重新创建会话获取新 cookie
                 pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
 
             except ResponseError as e:
@@ -167,11 +184,9 @@ if start and total_kw > 0:
                 break
 
         else:
-            # 重试耗尽
             failed_kw.append(kw)
             status_area.error(f"❌ '{kw}' 重试 {max_retries} 次后仍失败，跳过")
 
-        # 请求间隔（最后一个不用等）
         if i < total_kw - 1:
             jitter = random.uniform(0, 2)
             time.sleep(effective_interval + jitter)
@@ -260,148 +275,139 @@ if start and total_kw > 0:
 
     # ── 结果展示 ──────────────────────────────────────────────
     if all_rising:
-        combined = pd.concat(all_rising, ignore_index=True)
+            combined = pd.concat(all_rising, ignore_index=True)
+            combined['value_num'] = pd.to_numeric(combined['value'], errors='coerce')
+            has_numeric = combined['value_num'].notna()
+            breakout_df = combined[~has_numeric].copy()
 
-        # value 列可能是 "Breakout" 字符串或数字
-        combined['value_num'] = pd.to_numeric(combined['value'], errors='coerce')
-        # Breakout 视为最大值排在最前
-        has_numeric = combined['value_num'].notna()
-        breakout_df = combined[~has_numeric].copy()
+            total_rising = len(combined)
+            total_sources = combined['keyword'].nunique()
 
-        total_rising = len(combined)
-        total_sources = combined['keyword'].nunique()
+            st.divider()
+            st.subheader("🚀 相关爆增词汇总（近期增长最多）")
+            st.markdown(f"**共找到 {total_rising} 个上升词，来自 {total_sources} 个词根**")
 
-        st.divider()
-        st.subheader("🚀 相关爆增词汇总（近 7 天增长最多）")
-        st.markdown(f"**共找到 {total_rising} 个上升词，来自 {total_sources} 个词根**")
+            if spike_results:
+                combined['趋势'] = combined['query'].map(
+                    lambda q: spike_results[q]['pattern'] if q in spike_results else ''
+                )
+                new_count = sum(1 for v in spike_results.values() if v['pattern'] == '新词飙升')
+                spike_count = sum(1 for v in spike_results.values() if v['pattern'] == '近日飙升')
+                parts = []
+                if new_count > 0:
+                    parts.append(f"**{new_count}** 个 **新词飙升** ✨")
+                if spike_count > 0:
+                    parts.append(f"**{spike_count}** 个 **近日飙升** 🔥")
+                if parts:
+                    st.markdown("其中 " + "，".join(parts))
+            else:
+                combined['趋势'] = ''
 
-        # 把趋势标签合并到数据中
-        if spike_results:
-            combined['趋势'] = combined['query'].map(
-                lambda q: spike_results[q]['pattern'] if q in spike_results else ''
-            )
-            new_count = sum(1 for v in spike_results.values() if v['pattern'] == '新词飙升')
-            spike_count = sum(1 for v in spike_results.values() if v['pattern'] == '近日飙升')
-            parts = []
-            if new_count > 0:
-                parts.append(f"**{new_count}** 个 **新词飙升** ✨")
-            if spike_count > 0:
-                parts.append(f"**{spike_count}** 个 **近日飙升** 🔥")
-            if parts:
-                st.markdown("其中 " + "，".join(parts))
-        else:
-            combined['趋势'] = ''
+            col_chart, col_table = st.columns([3, 2])
 
-        col_chart, col_table = st.columns([3, 2])
+            with col_chart:
+                chart_df = combined.copy()
+                max_val = chart_df['value_num'].max()
+                breakout_placeholder = max_val * 1.2 if pd.notna(max_val) and max_val > 0 else 100000
+                chart_df.loc[chart_df['value_num'].isna(), 'value_num'] = breakout_placeholder
 
-        with col_chart:
-            # 合并数值和 Breakout，Breakout 用一个大数值占位以便排序
-            chart_df = combined.copy()
-            max_val = chart_df['value_num'].max()
-            breakout_placeholder = max_val * 1.2 if pd.notna(max_val) and max_val > 0 else 100000
-            chart_df.loc[chart_df['value_num'].isna(), 'value_num'] = breakout_placeholder
+                top_n = chart_df.nlargest(20, 'value_num').copy()
+                def make_label(row):
+                    name = row['query'][:25] + '...' if len(row['query']) > 25 else row['query']
+                    tag = row.get('趋势', '')
+                    if tag == '新词飙升':
+                        return name + ' ✨'
+                    elif tag == '近日飙升':
+                        return name + ' 🔥'
+                    return name
+                top_n['label'] = top_n.apply(make_label, axis=1)
 
-            top_n = chart_df.nlargest(20, 'value_num').copy()
-            # 截断长标签，加趋势标记
-            def make_label(row):
-                name = row['query'][:25] + '...' if len(row['query']) > 25 else row['query']
-                tag = row.get('趋势', '')
-                if tag == '新词飙升':
-                    return name + ' ✨'
-                elif tag == '近日飙升':
-                    return name + ' 🔥'
-                return name
-            top_n['label'] = top_n.apply(make_label, axis=1)
+                fig = px.bar(
+                    top_n.iloc[::-1],
+                    x='value_num',
+                    y='label',
+                    orientation='h',
+                    labels={'value_num': '增长幅度 (%)', 'label': '', 'keyword': '词根'},
+                    color='keyword',
+                    color_discrete_sequence=px.colors.qualitative.Pastel,
+                )
+                fig.update_layout(
+                    height=max(450, len(top_n) * 32),
+                    margin=dict(l=0, r=20, t=10, b=0),
+                    yaxis=dict(tickfont=dict(size=12)),
+                    legend=dict(title='词根', font=dict(size=11)),
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
-            fig = px.bar(
-                top_n.iloc[::-1],
-                x='value_num',
-                y='label',
-                orientation='h',
-                labels={'value_num': '增长幅度 (%)', 'label': '', 'keyword': '词根'},
-                color='keyword',
-                color_discrete_sequence=px.colors.qualitative.Pastel,
-            )
-            fig.update_layout(
-                height=max(450, len(top_n) * 32),
-                margin=dict(l=0, r=20, t=10, b=0),
-                yaxis=dict(tickfont=dict(size=12)),
-                legend=dict(title='词根', font=dict(size=11)),
-            )
-            st.plotly_chart(fig, use_container_width=True)
+            with col_table:
+                display_df = combined[['query', 'value', 'keyword', '趋势']].copy()
+                display_df['增长量'] = display_df['value'].apply(
+                    lambda v: f'+{v}%' if str(v).isdigit() else '飙升'
+                )
+                display_df = display_df.rename(columns={'query': '爆词', 'keyword': '来源词根'})
+                display_df = display_df.sort_values(
+                    by='value',
+                    key=lambda s: pd.to_numeric(s, errors='coerce').fillna(float('inf')),
+                    ascending=False
+                )
+                display_df = display_df[['爆词', '增长量', '趋势', '来源词根']]
+                st.dataframe(display_df, use_container_width=True, hide_index=True, height=600)
 
-        with col_table:
-            # 格式化增长量列
-            display_df = combined[['query', 'value', 'keyword', '趋势']].copy()
-            display_df['增长量'] = display_df['value'].apply(
-                lambda v: f'+{v}%' if str(v).isdigit() else '飙升'
-            )
-            display_df = display_df.rename(columns={'query': '爆词', 'keyword': '来源词根'})
-            display_df = display_df.sort_values(
-                by='value',
-                key=lambda s: pd.to_numeric(s, errors='coerce').fillna(float('inf')),
-                ascending=False
-            )
-            display_df = display_df[['爆词', '增长量', '趋势', '来源词根']]
-            st.dataframe(display_df, use_container_width=True, hide_index=True, height=600)
+                csv = display_df.to_csv(index=False).encode('utf-8-sig')
+                st.download_button(
+                    label="📥 下载 CSV",
+                    data=csv,
+                    file_name="trending_keywords.csv",
+                    mime="text/csv",
+                    use_container_width=True,
+                )
 
-            # 下载按钮
-            csv = display_df.to_csv(index=False).encode('utf-8-sig')
-            st.download_button(
-                label="📥 下载 CSV",
-                data=csv,
-                file_name="trending_keywords.csv",
-                mime="text/csv",
-                use_container_width=True,
-            )
+            # 近日飙升词趋势曲线
+            if spike_results:
+                new_queries = [q for q, v in spike_results.items() if v['pattern'] == '新词飙升']
+                spike_queries = [q for q, v in spike_results.items() if v['pattern'] == '近日飙升']
+                hot_queries = new_queries + spike_queries
 
-        # ── 近日飙升词趋势曲线 ────────────────────────────────
-        if spike_results:
-            new_queries = [q for q, v in spike_results.items() if v['pattern'] == '新词飙升']
-            spike_queries = [q for q, v in spike_results.items() if v['pattern'] == '近日飙升']
-            hot_queries = new_queries + spike_queries
+                if hot_queries:
+                    st.divider()
+                    st.subheader("🔥 近日突然飙升的词 — 趋势曲线")
+                    st.caption("✨ 新词飙升 = 之前几乎无搜索量，近日突然出现的全新热词 &nbsp;&nbsp; 🔥 近日飙升 = 已有搜索量，近日突然大幅上升")
 
-            if hot_queries:
-                st.divider()
-                st.subheader("🔥 近日突然飙升的词 — 趋势曲线")
-                st.caption("✨ 新词飙升 = 之前几乎无搜索量，近日突然出现的全新热词 &nbsp;&nbsp; 🔥 近日飙升 = 已有搜索量，近日突然大幅上升")
-
-                # 每行展示 3 个迷你趋势图
-                cols_per_row = 3
-                for row_start in range(0, len(hot_queries), cols_per_row):
-                    cols = st.columns(cols_per_row)
-                    for ci, col in enumerate(cols):
-                        idx = row_start + ci
-                        if idx >= len(hot_queries):
-                            break
-                        q = hot_queries[idx]
-                        info = spike_results[q]
-                        trend = info['trend']
-                        tag = '✨ 新词' if info['pattern'] == '新词飙升' else '🔥 飙升'
-                        line_color = '#f59e0b' if info['pattern'] == '新词飙升' else '#ff4b4b'
-                        with col:
-                            fig_mini = go.Figure()
-                            fig_mini.add_trace(go.Scatter(
-                                y=trend, mode='lines+markers',
-                                line=dict(color=line_color, width=2),
-                                marker=dict(size=3),
-                                hoverinfo='y',
-                            ))
-                            fig_mini.update_layout(
-                                title=dict(text=f'{tag} {q[:25]}', font=dict(size=13)),
-                                height=180,
-                                margin=dict(l=10, r=10, t=35, b=10),
-                                xaxis=dict(showticklabels=False, showgrid=False),
-                                yaxis=dict(showticklabels=False, showgrid=True, gridcolor='#f0f0f0'),
-                                plot_bgcolor='white',
-                            )
-                            st.plotly_chart(fig_mini, use_container_width=True)
-
-        if failed_kw:
-            st.warning(f"以下 {len(failed_kw)} 个词查询失败: {', '.join(failed_kw)}")
+                    cols_per_row = 3
+                    for row_start in range(0, len(hot_queries), cols_per_row):
+                        cols = st.columns(cols_per_row)
+                        for ci, col in enumerate(cols):
+                            idx = row_start + ci
+                            if idx >= len(hot_queries):
+                                break
+                            q = hot_queries[idx]
+                            info = spike_results[q]
+                            trend = info['trend']
+                            tag = '✨ 新词' if info['pattern'] == '新词飙升' else '🔥 飙升'
+                            line_color = '#f59e0b' if info['pattern'] == '新词飙升' else '#ff4b4b'
+                            with col:
+                                fig_mini = go.Figure()
+                                fig_mini.add_trace(go.Scatter(
+                                    y=trend, mode='lines+markers',
+                                    line=dict(color=line_color, width=2),
+                                    marker=dict(size=3),
+                                    hoverinfo='y',
+                                ))
+                                fig_mini.update_layout(
+                                    title=dict(text=f'{tag} {q[:25]}', font=dict(size=13)),
+                                    height=180,
+                                    margin=dict(l=10, r=10, t=35, b=10),
+                                    xaxis=dict(showticklabels=False, showgrid=False),
+                                    yaxis=dict(showticklabels=False, showgrid=True, gridcolor='#f0f0f0'),
+                                    plot_bgcolor='white',
+                                )
+                                st.plotly_chart(fig_mini, use_container_width=True)
 
     else:
         st.warning("未查询到任何上升趋势词。可能是关键词太冷门，或遭遇限流。请调大请求间隔后重试。")
+
+    if failed_kw:
+        st.warning(f"以下 {len(failed_kw)} 个词查询失败: {', '.join(failed_kw)}")
 
 elif start and total_kw == 0:
     st.error("请输入至少一个关键词")
