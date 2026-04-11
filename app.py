@@ -5,8 +5,85 @@ import plotly.express as px
 import plotly.graph_objects as go
 import time
 import random
+import json
+import requests as http_requests
+from datetime import datetime
+from pathlib import Path
 from pytrends.request import TrendReq
 from pytrends.exceptions import TooManyRequestsError, ResponseError
+
+# ── 飞书通知 ──────────────────────────────────────────────────
+def load_notify_config():
+    config_path = Path(__file__).parent / "config.json"
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg.get("notify", {})
+    return {}
+
+def send_feishu_notify(combined, spike_results=None):
+    """查询完成后发送飞书通知"""
+    notify = load_notify_config()
+    webhook = notify.get("feishu_webhook", "")
+    if not webhook:
+        return
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    total = len(combined)
+    sources = combined['keyword'].nunique()
+
+    # 排序取 Top 15
+    df = combined.copy()
+    df['_sort'] = pd.to_numeric(df['value'], errors='coerce')
+    max_v = df['_sort'].max()
+    df.loc[df['_sort'].isna(), '_sort'] = (max_v * 2) if pd.notna(max_v) else 999999
+    top = df.nlargest(15, '_sort')
+
+    content_lines = [
+        [{"tag": "text", "text": f"📅 {now}\n共找到 {total} 个上升词，来自 {sources} 个词根"}],
+    ]
+
+    if spike_results:
+        new_count = sum(1 for v in spike_results.values() if v.get('pattern') == '新词飙升')
+        spike_count = sum(1 for v in spike_results.values() if v.get('pattern') == '近日飙升')
+        parts = []
+        if new_count > 0:
+            parts.append(f"✨ {new_count} 个新词飙升")
+        if spike_count > 0:
+            parts.append(f"🔥 {spike_count} 个近日飙升")
+        if parts:
+            content_lines.append([{"tag": "text", "text": "  ".join(parts)}])
+
+    content_lines.append([{"tag": "text", "text": "\n📊 Top 15 爆增词:"}])
+
+    for _, row in top.iterrows():
+        val = row['value']
+        growth = f'+{val}%' if str(val).isdigit() else '飙升'
+        trend_tag = ''
+        if '趋势' in row and row['趋势'] == '新词飙升':
+            trend_tag = ' ✨新词'
+        elif '趋势' in row and row['趋势'] == '近日飙升':
+            trend_tag = ' 🔥飙升'
+        content_lines.append([
+            {"tag": "text", "text": f"{row['query']}  ({growth}){trend_tag}  ← {row['keyword']}"},
+        ])
+
+    payload = {
+        "msg_type": "post",
+        "content": {
+            "post": {
+                "zh_cn": {
+                    "title": "🔥 热点关键词趋势报告",
+                    "content": content_lines,
+                }
+            }
+        }
+    }
+    try:
+        resp = http_requests.post(webhook, json=payload, timeout=10)
+        return resp.status_code == 200
+    except Exception:
+        return False
 
 st.set_page_config(page_title="热点关键词趋势追踪", page_icon="🔥", layout="wide")
 
@@ -327,6 +404,12 @@ if start and total_kw > 0:
                     st.markdown("其中 " + "，".join(parts))
             else:
                 combined['趋势'] = ''
+
+            # 发送飞书通知
+            if send_feishu_notify(combined, spike_results):
+                st.success("✅ 飞书通知已发送")
+            else:
+                st.warning("⚠️ 飞书通知发送失败，请检查 config.json 中的 webhook 配置")
 
             col_chart, col_table = st.columns([3, 2])
 
