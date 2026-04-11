@@ -31,6 +31,31 @@ with st.sidebar:
         ("仅手动执行", "manual"),
     ], format_func=lambda x: x[0], index=0)
 
+    freq = track_freq[1]
+    if freq != 'manual':
+        if freq == 'daily_2':
+            st.markdown("**执行时间**")
+            run_time_1 = st.time_input("第 1 次", value=pd.Timestamp("08:00").time(), key="t1")
+            run_time_2 = st.time_input("第 2 次", value=pd.Timestamp("20:00").time(), key="t2")
+            st.caption("建议早晚各一次，如 8:00 和 20:00")
+        elif freq == 'daily_1':
+            run_time = st.time_input("执行时间", value=pd.Timestamp("09:00").time())
+            st.caption("建议 8:00-10:00，数据更新及时")
+        elif freq == 'weekly_1':
+            run_day = st.selectbox("执行日", ["周一", "周二", "周三", "周四", "周五", "周六", "周日"], index=0)
+            run_time = st.time_input("执行时间", value=pd.Timestamp("09:00").time())
+        elif freq == 'weekly_2':
+            st.markdown("**执行日**")
+            run_day_1 = st.selectbox("第 1 天", ["周一", "周二", "周三", "周四", "周五", "周六", "周日"], index=0, key="d1")
+            run_day_2 = st.selectbox("第 2 天", ["周一", "周二", "周三", "周四", "周五", "周六", "周日"], index=3, key="d2")
+            run_time = st.time_input("执行时间", value=pd.Timestamp("09:00").time())
+        elif freq == 'weekly_3':
+            st.markdown("**执行日**")
+            run_day_1 = st.selectbox("第 1 天", ["周一", "周二", "周三", "周四", "周五", "周六", "周日"], index=0, key="d1")
+            run_day_2 = st.selectbox("第 2 天", ["周一", "周二", "周三", "周四", "周五", "周六", "周日"], index=2, key="d2")
+            run_day_3 = st.selectbox("第 3 天", ["周一", "周二", "周三", "周四", "周五", "周六", "周日"], index=4, key="d3")
+            run_time = st.time_input("执行时间", value=pd.Timestamp("09:00").time())
+
     st.divider()
 
     geo = st.selectbox("主要地区", [
