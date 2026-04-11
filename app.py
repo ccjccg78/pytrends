@@ -222,7 +222,8 @@ keywords_input = st.text_area(
 )
 
 # 解析关键词
-kw_list = [kw.strip() for kw in keywords_input.split(",") if kw.strip()]
+import re
+kw_list = [kw.strip() for kw in re.split(r'[,\n]+', keywords_input) if kw.strip()]
 total_kw = len(kw_list)
 
 if total_kw > 0:
