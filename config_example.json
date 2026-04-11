@@ -1,0 +1,20 @@
+{
+    "keywords": [
+        "Translate", "Generator", "Example", "Convert", "Online",
+        "Downloader", "Maker", "Creator", "Editor", "Processor",
+        "Designer", "Compiler", "Analyzer", "Interpreter", "Calculator"
+    ],
+
+    "geo": "",
+    "category": 0,
+    "timeframe": "now 7-d",
+    "request_interval": 8,
+    "spike_top_n": 20,
+
+    "notify": {
+        "feishu_webhook": "",
+        "wecom_webhook": "",
+        "serverchan_sendkey": "",
+        "pushplus_token": ""
+    }
+}
