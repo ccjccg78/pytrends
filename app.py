@@ -304,7 +304,7 @@ with st.sidebar:
 # ════════════════════════════════════════════════════════════════
 # 主区域 - 标签页
 # ════════════════════════════════════════════════════════════════
-tab1, tab2 = st.tabs(["🔍 爆增词追踪", "🔥 时下流行"])
+tab1, tab2, tab3 = st.tabs(["🔍 爆增词追踪", "🔥 时下流行", "🗺 Sitemap 监控"])
 
 # ════════════════════════════════════════════════════════════════
 # Tab 1: 爆增词追踪
@@ -717,3 +717,131 @@ with tab2:
             except Exception as e:
                 st.error(f"获取失败: {e}")
                 st.info("提示：时下流行功能需要服务器能访问 Google Trends。如遇网络问题，请检查服务器网络。")
+
+
+# ════════════════════════════════════════════════════════════════
+# Tab 3: Sitemap 监控
+# ════════════════════════════════════════════════════════════════
+with tab3:
+    st.title("🗺 Sitemap 监控")
+    st.caption("监控竞品网站 Sitemap 变化，发现新页面时推送飞书通知")
+
+    import xml.etree.ElementTree as ET
+    from urllib.parse import urlparse
+
+    SITEMAP_DIR = Path(__file__).parent / "output" / "sitemaps"
+
+    # 从 config.json 读取已配置的 sitemap URL
+    config_sitemaps = APP_CONFIG.get("sitemap_urls", [])
+
+    st.subheader("📋 监控列表")
+
+    if config_sitemaps:
+        for i, url in enumerate(config_sitemaps):
+            domain = urlparse(url).netloc
+            cache_file = SITEMAP_DIR / f"{domain}.xml"
+            status = "✅ 已有快照" if cache_file.exists() else "🆕 待首次采集"
+            st.markdown(f"**{i+1}.** `{url}`  {status}")
+    else:
+        st.info("未配置监控站点。请在 config.json 的 `sitemap_urls` 中添加 Sitemap URL。")
+        st.code('{\n  "sitemap_urls": [\n    "https://example.com/sitemap.xml"\n  ]\n}', language="json")
+
+    st.divider()
+
+    start_sitemap = st.button("🔍 立即检查", type="primary", use_container_width=True,
+                               disabled=len(config_sitemaps) == 0)
+
+    if start_sitemap and config_sitemaps:
+        SITEMAP_DIR.mkdir(parents=True, exist_ok=True)
+        all_changes = {}
+
+        progress_bar = st.progress(0, text="开始检查...")
+        total = len(config_sitemaps)
+
+        for i, url in enumerate(config_sitemaps):
+            domain = urlparse(url).netloc
+            progress_bar.progress(i / total, text=f"检查 {domain}...")
+
+            try:
+                resp = http_requests.get(url, timeout=15, headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                })
+                resp.raise_for_status()
+
+                root = ET.fromstring(resp.content)
+                ns = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+                new_urls = set()
+                for loc in root.findall('.//ns:url/ns:loc', ns):
+                    if loc.text:
+                        new_urls.add(loc.text.strip())
+
+                # 读取旧快照
+                cache_file = SITEMAP_DIR / f"{domain}.xml"
+                old_urls = set()
+                if cache_file.exists():
+                    old_root = ET.fromstring(cache_file.read_text(encoding='utf-8'))
+                    for loc in old_root.findall('.//ns:url/ns:loc', ns):
+                        if loc.text:
+                            old_urls.add(loc.text.strip())
+
+                added = new_urls - old_urls
+                if added:
+                    all_changes[domain] = {
+                        'new_urls': sorted(added),
+                        'total': len(new_urls),
+                        'old_total': len(old_urls),
+                    }
+
+                # 保存最新版本
+                cache_file.write_text(resp.text, encoding='utf-8')
+
+            except Exception as e:
+                st.error(f"❌ {domain} 检查失败: {e}")
+
+        progress_bar.progress(1.0, text="检查完成！")
+
+        st.divider()
+
+        if all_changes:
+            total_new = sum(len(v['new_urls']) for v in all_changes.values())
+            st.subheader(f"🆕 发现 {total_new} 个新页面")
+
+            for domain, info in all_changes.items():
+                with st.expander(f"🌐 {domain}（{info['old_total']} → {info['total']}，+{len(info['new_urls'])}）", expanded=True):
+                    for u in info['new_urls']:
+                        st.markdown(f"- {u}")
+
+            # 飞书通知
+            notify = load_notify_config()
+            webhook = notify.get("feishu_webhook", "")
+            if webhook:
+                from datetime import timezone
+                BEIJING_TZ = timezone(timedelta(hours=8))
+                now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+                content_lines = [
+                    [{"tag": "text", "text": f"📅 {now}\n{len(all_changes)} 个站点有更新，共 {total_new} 个新页面"}],
+                ]
+                for domain, info in all_changes.items():
+                    content_lines.append([{"tag": "text", "text": f"\n🌐 {domain}（{info['old_total']} → {info['total']}）:"}])
+                    for u in info['new_urls'][:20]:
+                        content_lines.append([{"tag": "text", "text": f"  {u}"}])
+                    if len(info['new_urls']) > 20:
+                        content_lines.append([{"tag": "text", "text": f"  ...等共 {len(info['new_urls'])} 个新 URL"}])
+
+                payload = {
+                    "msg_type": "post",
+                    "content": {"post": {"zh_cn": {
+                        "title": "🗺 Sitemap 监控报告",
+                        "content": content_lines,
+                    }}}
+                }
+                try:
+                    feishu_resp = http_requests.post(webhook, json=payload, timeout=10)
+                    if feishu_resp.status_code == 200:
+                        st.success("✅ 飞书通知已发送")
+                    else:
+                        st.warning(f"⚠️ 飞书通知失败: {feishu_resp.status_code}")
+                except Exception:
+                    st.warning("⚠️ 飞书通知发送异常")
+        else:
+            st.success("✅ 所有站点无变化")
