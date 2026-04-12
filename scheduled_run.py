@@ -478,6 +478,34 @@ def fetch_sitemap(url):
 
 
 MAX_SUB_SITEMAPS = 20  # 最多展开20个子 sitemap，防止内存爆炸
+# 大站优化：JSON 缓存超过此大小(字节)时，先对比索引再决定是否全量展开
+LARGE_SITE_THRESHOLD = 1 * 1024 * 1024  # 1MB
+
+import hashlib
+
+
+def _get_sub_sitemap_locs(xml_content):
+    """从 sitemapindex XML 提取子 sitemap URL 列表（不展开）"""
+    root = ET.fromstring(xml_content)
+    ns = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+    if 'sitemapindex' not in root.tag:
+        return None  # 不是 sitemapindex
+    locs = []
+    for loc in root.findall('.//ns:sitemap/ns:loc', ns):
+        if loc.text:
+            locs.append(loc.text.strip())
+    return locs
+
+
+def _parse_single_sitemap(xml_content):
+    """解析单个 sitemap（不递归展开），返回 URL 集合"""
+    root = ET.fromstring(xml_content)
+    ns = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+    urls = set()
+    for loc in root.findall('.//ns:url/ns:loc', ns):
+        if loc.text:
+            urls.add(loc.text.strip())
+    return urls
 
 
 def parse_sitemap_urls(xml_content, follow_index=True):
@@ -498,15 +526,34 @@ def parse_sitemap_urls(xml_content, follow_index=True):
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                     })
                     if sub_resp.status_code == 200:
-                        sub_urls = parse_sitemap_urls(sub_resp.text, follow_index=False)
+                        sub_urls = _parse_single_sitemap(sub_resp.text)
                         urls.update(sub_urls)
                 except Exception:
                     pass
     return urls
 
 
+def _load_index_hash(domain):
+    """加载上次保存的 sitemapindex 哈希"""
+    meta_file = SITEMAP_DIR / f"{domain}.meta.json"
+    if meta_file.exists():
+        meta = json.loads(meta_file.read_text(encoding='utf-8'))
+        return meta.get("index_hash", "")
+    return ""
+
+
+def _save_index_hash(domain, index_hash):
+    """保存 sitemapindex 哈希"""
+    meta_file = SITEMAP_DIR / f"{domain}.meta.json"
+    meta_file.write_text(json.dumps({"index_hash": index_hash}), encoding='utf-8')
+
+
 def check_sitemaps(config):
-    """检查所有监控的 sitemap，返回各站点新增 URL"""
+    """检查所有监控的 sitemap，返回各站点新增 URL
+
+    大站优化：对于缓存 > 1MB 的 sitemapindex 站点，先对比索引页哈希。
+    索引没变 = 子 sitemap 列表没变 = 跳过全量展开，节省大量时间和内存。
+    """
     sitemap_urls = config.get("sitemap_urls", [])
     if not sitemap_urls:
         print("未配置 sitemap_urls，跳过")
@@ -517,14 +564,42 @@ def check_sitemaps(config):
 
     for url in sitemap_urls:
         domain = url.split("//")[-1].split("/")[0]
-        print(f"  📡 检查 {domain}...")
+        cache_file = SITEMAP_DIR / f"{domain}.json"
+        is_large = cache_file.exists() and cache_file.stat().st_size > LARGE_SITE_THRESHOLD
+
+        print(f"  📡 检查 {domain}{'（大站快速模式）' if is_large else ''}...")
 
         try:
+            # 第一步：下载主 sitemap/sitemapindex
             new_content = fetch_sitemap(url)
+
+            # 大站优化：如果是 sitemapindex 且缓存很大，先对比索引哈希
+            if is_large:
+                sub_locs = _get_sub_sitemap_locs(new_content)
+                if sub_locs is not None:
+                    # 是 sitemapindex，计算子 sitemap 列表的哈希
+                    index_hash = hashlib.md5("\n".join(sorted(sub_locs)).encode()).hexdigest()
+                    old_hash = _load_index_hash(domain)
+
+                    if index_hash == old_hash:
+                        # 索引没变，跳过全量展开
+                        old_count = len(json.loads(cache_file.read_text(encoding='utf-8')))
+                        print(f"    -> 索引未变化，跳过全量解析（缓存 {old_count} 个 URL）")
+                        continue
+
+                    # 索引有变化，做全量展开
+                    print(f"    -> 索引有变化（{len(sub_locs)} 个子sitemap），全量解析...")
+                    _save_index_hash(domain, index_hash)
+
             new_urls = parse_sitemap_urls(new_content)
 
+            # 保存索引哈希（非大站首次也保存，为下次做准备）
+            sub_locs = _get_sub_sitemap_locs(new_content)
+            if sub_locs is not None:
+                index_hash = hashlib.md5("\n".join(sorted(sub_locs)).encode()).hexdigest()
+                _save_index_hash(domain, index_hash)
+
             # 读取上次保存的 URL 列表
-            cache_file = SITEMAP_DIR / f"{domain}.json"
             old_urls = set()
             if cache_file.exists():
                 old_urls = set(json.loads(cache_file.read_text(encoding='utf-8')))
@@ -542,7 +617,7 @@ def check_sitemaps(config):
             else:
                 print(f"    -> 无变化（共 {len(new_urls)} 个 URL）")
 
-            # 保存 URL 列表（JSON 格式，下次对比不需要重新展开子 sitemap）
+            # 保存 URL 列表
             cache_file.write_text(json.dumps(sorted(new_urls), ensure_ascii=False), encoding='utf-8')
 
         except Exception as e:
