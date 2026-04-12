@@ -67,7 +67,7 @@ def load_notify_config():
     return {}
 
 def send_feishu_notify(combined, spike_results=None, title="🔥 热点关键词趋势报告"):
-    """查询完成后发送飞书通知，每个新词单独一条消息"""
+    """查询完成后发送飞书通知，列表格式一条消息"""
     notify = load_notify_config()
     webhook = notify.get("feishu_webhook", "")
     if not webhook:
@@ -77,79 +77,76 @@ def send_feishu_notify(combined, spike_results=None, title="🔥 热点关键词
     total = len(combined)
     sources = combined['keyword'].nunique() if 'keyword' in combined.columns else 0
 
-    # 排序取 Top 15
+    # 排序
     df = combined.copy()
     if 'value' in df.columns:
         df['_sort'] = pd.to_numeric(df['value'], errors='coerce')
         max_v = df['_sort'].max()
         df.loc[df['_sort'].isna(), '_sort'] = (max_v * 2) if pd.notna(max_v) else 999999
-        top = df.nlargest(15, '_sort')
+        top = df.nlargest(30, '_sort')
     else:
-        top = df.head(15)
+        top = df.head(30)
 
-    # 汇总消息
-    summary_parts = [f"📅 {now}", f"共找到 {total} 条结果"]
+    # 汇总头部
+    summary = f"📅 {now}\n"
     if sources > 0:
-        summary_parts[1] = f"共找到 {total} 个上升词，来自 {sources} 个词根"
+        summary += f"共找到 {total} 个上升词，来自 {sources} 个词根"
+    else:
+        summary += f"共找到 {total} 条结果"
+
     if spike_results:
         new_count = sum(1 for v in spike_results.values() if v.get('pattern') == '新词飙升')
         spike_count = sum(1 for v in spike_results.values() if v.get('pattern') == '近日飙升')
         if new_count > 0:
-            summary_parts.append(f"✨ {new_count} 个新词飙升")
+            summary += f"\n✨ {new_count} 个新词飙升"
         if spike_count > 0:
-            summary_parts.append(f"🔥 {spike_count} 个近日飙升")
+            summary += f"  🔥 {spike_count} 个近日飙升"
 
-    summary_payload = {
+    content_lines = [
+        [{"tag": "text", "text": summary}],
+    ]
+
+    # 列表格式，每行一条
+    for _, row in top.iterrows():
+        parts = []
+
+        # 查询词/话题
+        query = str(row.get('query', row.get('title', '')))
+        parts.append(query)
+
+        # 增长率/搜索量
+        if 'value' in row:
+            val = row['value']
+            growth = f'+{val}%' if str(val).isdigit() else '飙升'
+            parts.append(f"({growth})")
+        if 'formattedTraffic' in row and row['formattedTraffic']:
+            parts.append(f"({row['formattedTraffic']})")
+
+        # 趋势标记
+        if '趋势' in row and row['趋势']:
+            tag_map = {'新词飙升': '✨新词', '近日飙升': '🔥飙升', '持续上升': '📈上升'}
+            tag = tag_map.get(row['趋势'], '')
+            if tag:
+                parts.append(tag)
+
+        # 来源
+        if 'keyword' in row:
+            parts.append(f"← {row['keyword']}")
+
+        content_lines.append([{"tag": "text", "text": "  ".join(parts)}])
+
+    payload = {
         "msg_type": "post",
         "content": {"post": {"zh_cn": {
             "title": title,
-            "content": [[{"tag": "text", "text": "\n".join(summary_parts)}]],
+            "content": content_lines,
         }}}
     }
     try:
-        http_requests.post(webhook, json=summary_payload, timeout=10)
+        resp = http_requests.post(webhook, json=payload, timeout=10)
+        return resp.status_code == 200
     except Exception:
-        pass
-
-    # 逐条发送详情
-    success = True
-    for _, row in top.iterrows():
-        lines = ["⚠ 监测到新的关键词", ""]
-
-        if 'keyword' in row:
-            lines.append(f"主关键词: {row['keyword']}")
-        if 'query' in row:
-            lines.append(f"相关查询: {row['query']}")
-        elif 'title' in row:
-            lines.append(f"话题: {row['title']}")
-
-        if 'value' in row:
-            val = row['value']
-            growth = f'+{val}%' if str(val).isdigit() else ('飙升' if val == 'Breakout' else str(val))
-            lines.append(f"增长率: {growth}")
-        if 'formattedTraffic' in row:
-            lines.append(f"搜索量: {row['formattedTraffic']}")
-
-        trend_tag = ''
-        if '趋势' in row and row['趋势']:
-            lines.append(f"趋势: {row['趋势']}")
-
-        detail_payload = {
-            "msg_type": "post",
-            "content": {"post": {"zh_cn": {
-                "title": f"📊 {str(row.get('query', row.get('title', '')))[:30]}",
-                "content": [[{"tag": "text", "text": "\n".join(lines)}]],
-            }}}
-        }
-        try:
-            resp = http_requests.post(webhook, json=detail_payload, timeout=10)
-            if resp.status_code != 200:
-                success = False
-            time.sleep(0.5)
-        except Exception:
-            success = False
-
-    return success
+        return False
 
 
 # ════════════════════════════════════════════════════════════════

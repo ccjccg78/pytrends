@@ -178,21 +178,15 @@ def send_trending_feishu(webhook_url, all_results):
     # 按搜索量排序
     all_results.sort(key=lambda x: x['traffic_num'], reverse=True)
 
-    # 按地区分组统计
-    region_counts = {}
-    for r in all_results:
-        region_counts[r['region']] = region_counts.get(r['region'], 0) + 1
-
     # 汇总信息
     content_lines = [
         [{"tag": "text", "text": f"📅 {now}\n共采集 {len(ALL_REGIONS)} 个地区，找到 {len(all_results)} 条热搜（搜索量>5000）"}],
-        [{"tag": "text", "text": "\n".join([f"  {k}: {v}条" for k, v in region_counts.items()])}],
-        [{"tag": "text", "text": "\n📊 全球 Top 20 热搜:"}],
+        [{"tag": "text", "text": "\n📊 全球热搜:"}],
     ]
 
-    # Top 20
-    for item in all_results[:20]:
-        line = f"{item['title']}  ({item['traffic']})  [{item['region']}]"
+    # 所有结果列表，每行: 话题 (搜索量) ← 地区
+    for item in all_results:
+        line = f"{item['title']}  ({item['traffic']})  ← {item['region']}"
         content_lines.append([{"tag": "text", "text": line}])
 
     payload = {
@@ -211,28 +205,6 @@ def send_trending_feishu(webhook_url, all_results):
             print(f"❌ 飞书通知失败: {resp.status_code} {resp.text}")
     except Exception as e:
         print(f"❌ 飞书通知异常: {e}")
-
-    # 逐条发送 Top 10 详情
-    for item in all_results[:10]:
-        lines = [
-            "⚠ 监测到热门话题",
-            "",
-            f"话题: {item['title']}",
-            f"搜索量: {item['traffic']}",
-            f"地区: {item['region']}",
-        ]
-        detail_payload = {
-            "msg_type": "post",
-            "content": {"post": {"zh_cn": {
-                "title": f"📊 {item['title'][:30]}",
-                "content": [[{"tag": "text", "text": "\n".join(lines)}]],
-            }}}
-        }
-        try:
-            http_requests.post(webhook_url, json=detail_payload, timeout=10)
-            time.sleep(0.5)
-        except Exception:
-            pass
 
 
 # ── 爆增词采集 ────────────────────────────────────────────────
