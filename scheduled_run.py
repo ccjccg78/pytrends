@@ -4,10 +4,10 @@
 使用方式:
   1. 复制 config_example.json 为 config.json，填入你的配置
   2. 手动运行: python scheduled_run.py
-  3. 定时任务 (北京时间早上6点 = UTC 22:00):
+  3. 定时任务 (北京时间):
      crontab -e 添加:
-     0 22 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode trending
-     30 22,10 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode sitemap
+     0 21 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode trending
+     0 22,9 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode sitemap
      0 0 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode rising
 
 支持模式:
