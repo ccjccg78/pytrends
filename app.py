@@ -277,7 +277,7 @@ with st.sidebar:
         ("过去 12 个月", "today 12-m"),
     ], format_func=lambda x: x[0], index=0)
 
-    request_interval = st.slider("请求间隔（秒）", min_value=2, max_value=300, value=5,
+    request_interval = st.slider("请求间隔（秒）", min_value=2, max_value=300, value=60,
                                   help="每次请求之间的基础等待时间，优先级最高")
 
     st.divider()
