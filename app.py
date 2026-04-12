@@ -788,8 +788,9 @@ with tab3:
     if config_sitemaps:
         for i, url in enumerate(config_sitemaps):
             domain = urlparse(url).netloc
-            cache_file = SITEMAP_DIR / f"{domain}.json"
-            status = "✅ 已有快照" if cache_file.exists() else "🆕 待首次采集"
+            # 兼容旧 .xml 和新 .json 缓存
+            has_cache = (SITEMAP_DIR / f"{domain}.json").exists() or (SITEMAP_DIR / f"{domain}.xml").exists()
+            status = "✅ 已有快照" if has_cache else "🆕 待首次采集"
             col_url, col_del = st.columns([5, 1])
             with col_url:
                 st.markdown(f"**{i+1}.** `{url}`  {status}")
