@@ -777,25 +777,18 @@ with tab3:
         st.info("暂无监控站点，请在下方添加。")
 
     # 批量添加 sitemap
-    new_sitemap_urls = st.text_area("添加网站（每行一个，自动补全 /sitemap.xml）",
-                                     placeholder="https://example.com\nhttps://another-site.com/sitemap.xml",
+    new_sitemap_urls = st.text_area("添加 Sitemap URL（每行一个）",
+                                     placeholder="https://example.com/sitemap.xml\nhttps://another-site.com/sitemap.xml",
                                      height=100, key="sitemap_input")
     if st.button("➕ 批量添加", key="add_sitemap"):
         if new_sitemap_urls.strip():
             added = 0
             for line in new_sitemap_urls.strip().splitlines():
-                url = line.strip().rstrip("/")
+                url = line.strip()
                 if not url:
                     continue
-                # 补全协议
                 if not url.startswith("http"):
                     url = "https://" + url
-                # 去掉路径后缀（如 /es/category/new），只保留域名
-                parsed = urlparse(url)
-                base_url = f"{parsed.scheme}://{parsed.netloc}"
-                # 自动补全 /sitemap.xml
-                if not url.endswith(".xml"):
-                    url = base_url + "/sitemap.xml"
                 if url not in config_sitemaps:
                     config_sitemaps.append(url)
                     added += 1
