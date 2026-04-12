@@ -22,7 +22,7 @@ def load_notify_config():
     return {}
 
 def send_feishu_notify(combined, spike_results=None):
-    """查询完成后发送飞书通知"""
+    """查询完成后发送飞书通知，每个新词单独一条消息"""
     notify = load_notify_config()
     webhook = notify.get("feishu_webhook", "")
     if not webhook:
@@ -39,51 +39,75 @@ def send_feishu_notify(combined, spike_results=None):
     df.loc[df['_sort'].isna(), '_sort'] = (max_v * 2) if pd.notna(max_v) else 999999
     top = df.nlargest(15, '_sort')
 
-    content_lines = [
-        [{"tag": "text", "text": f"📅 {now}\n共找到 {total} 个上升词，来自 {sources} 个词根"}],
-    ]
-
+    # 先发一条汇总消息
+    summary_parts = [f"📅 {now}", f"共找到 {total} 个上升词，来自 {sources} 个词根"]
     if spike_results:
         new_count = sum(1 for v in spike_results.values() if v.get('pattern') == '新词飙升')
         spike_count = sum(1 for v in spike_results.values() if v.get('pattern') == '近日飙升')
-        parts = []
         if new_count > 0:
-            parts.append(f"✨ {new_count} 个新词飙升")
+            summary_parts.append(f"✨ {new_count} 个新词飙升")
         if spike_count > 0:
-            parts.append(f"🔥 {spike_count} 个近日飙升")
-        if parts:
-            content_lines.append([{"tag": "text", "text": "  ".join(parts)}])
+            summary_parts.append(f"🔥 {spike_count} 个近日飙升")
 
-    content_lines.append([{"tag": "text", "text": "\n📊 Top 15 爆增词:"}])
-
-    for _, row in top.iterrows():
-        val = row['value']
-        growth = f'+{val}%' if str(val).isdigit() else '飙升'
-        trend_tag = ''
-        if '趋势' in row and row['趋势'] == '新词飙升':
-            trend_tag = ' ✨新词'
-        elif '趋势' in row and row['趋势'] == '近日飙升':
-            trend_tag = ' 🔥飙升'
-        content_lines.append([
-            {"tag": "text", "text": f"{row['query']}  ({growth}){trend_tag}  ← {row['keyword']}"},
-        ])
-
-    payload = {
+    summary_payload = {
         "msg_type": "post",
         "content": {
             "post": {
                 "zh_cn": {
                     "title": "🔥 热点关键词趋势报告",
-                    "content": content_lines,
+                    "content": [[{"tag": "text", "text": "\n".join(summary_parts)}]],
                 }
             }
         }
     }
     try:
-        resp = http_requests.post(webhook, json=payload, timeout=10)
-        return resp.status_code == 200
+        http_requests.post(webhook, json=summary_payload, timeout=10)
     except Exception:
-        return False
+        pass
+
+    # 逐条发送 Top 词详情
+    success = True
+    for _, row in top.iterrows():
+        val = row['value']
+        growth = f'+{val}%' if str(val).isdigit() else '飙升'
+        trend_tag = ''
+        if '趋势' in row and row['趋势'] == '新词飙升':
+            trend_tag = '✨ 新词飙升'
+        elif '趋势' in row and row['趋势'] == '近日飙升':
+            trend_tag = '🔥 近日飙升'
+        elif '趋势' in row and row['趋势'] == '持续上升':
+            trend_tag = '📈 持续上升'
+
+        lines = [
+            f"⚠ 监测到新的关键词",
+            f"",
+            f"主关键词: {row['keyword']}",
+            f"相关查询: {row['query']}",
+            f"增长率: {growth}",
+        ]
+        if trend_tag:
+            lines.append(f"趋势: {trend_tag}")
+
+        detail_payload = {
+            "msg_type": "post",
+            "content": {
+                "post": {
+                    "zh_cn": {
+                        "title": f"📊 {row['query'][:30]}",
+                        "content": [[{"tag": "text", "text": "\n".join(lines)}]],
+                    }
+                }
+            }
+        }
+        try:
+            resp = http_requests.post(webhook, json=detail_payload, timeout=10)
+            if resp.status_code != 200:
+                success = False
+            time.sleep(0.5)  # 避免发送太快
+        except Exception:
+            success = False
+
+    return success
 
 st.set_page_config(page_title="热点关键词趋势追踪", page_icon="🔥", layout="wide")
 
