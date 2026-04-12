@@ -1,13 +1,17 @@
 """
-定时抓取 Google Trends 爆增词并推送通知
+定时抓取 Google Trends 数据并推送通知
 
 使用方式:
   1. 复制 config_example.json 为 config.json，填入你的配置
-  2. 运行: python scheduled_run.py
-  3. 定时任务: crontab -e 添加:
-     0 9 * * 1,4 /path/to/.venv/bin/python /path/to/scheduled_run.py
+  2. 手动运行: python scheduled_run.py
+  3. 定时任务 (北京时间早上7点 = UTC 23:00):
+     crontab -e 添加:
+     0 23 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode trending
+     0 1 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode rising
 
-支持通知渠道: 飞书 / 企业微信 / Server酱(个人微信) / pushplus(个人微信)
+支持模式:
+  --mode trending  采集所有地区时下流行 (默认)
+  --mode rising    采集关键词爆增词
 """
 
 import json
@@ -15,15 +19,89 @@ import time
 import random
 import os
 import sys
+import argparse
+import xml.etree.ElementTree as ET
 import requests as http_requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-# 把项目目录加入 path，确保能 import pytrends
 sys.path.insert(0, str(Path(__file__).parent))
 
 from pytrends.request import TrendReq
 from pytrends.exceptions import TooManyRequestsError, ResponseError
+
+# 北京时间
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+# 所有采集地区
+ALL_REGIONS = [
+    ("美国", "US"),
+    ("英国", "GB"),
+    ("日本", "JP"),
+    ("德国", "DE"),
+    ("法国", "FR"),
+    ("加拿大", "CA"),
+    ("澳大利亚", "AU"),
+    ("印度", "IN"),
+    ("巴西", "BR"),
+    ("韩国", "KR"),
+    ("新加坡", "SG"),
+    ("中国台湾", "TW"),
+    ("中国香港", "HK"),
+]
+
+# 过滤词库
+EXCLUDE_CATEGORIES = {
+    "赌博": ["casino", "gambling", "gamble", "bet ", "betting", "slot machine", "poker", "roulette",
+            "blackjack", "lottery", "jackpot", "wager", "sportsbook"],
+    "人名/明星": ["wife", "husband", "boyfriend", "girlfriend", "married", "dating",
+                 "net worth", "birthday", "born", "died", "death", "funeral", "obituary",
+                 "son of", "daughter of", "who is", "how old"],
+    "体育": ["nba", "nfl", "nhl", "mlb", "fifa", "ufc", "boxing", "wrestling",
+            "playoff", "championship", "score", "highlights", "roster", "standings",
+            "draft pick", "super bowl", "world cup", "premier league", "la liga",
+            "serie a", "bundesliga", "vs ", " vs"],
+    "娱乐/影视": ["movie", "trailer", "episode", "season finale", "netflix", "hulu",
+                 "disney+", "box office", "premiere", "concert", "tour dates",
+                 "album release", "grammy", "oscar", "emmy"],
+    "新闻/时事": ["shooting", "earthquake", "hurricane", "tornado", "flood", "crash",
+                 "explosion", "protest", "riot", "scandal", "arrested", "convicted",
+                 "sentenced", "indicted", "breaking news", "election", "vote"],
+    "成人内容": ["porn", "xxx", "nude", "naked", "onlyfans", "nsfw", "adult video"],
+    "不相关": ["weather", "horoscope", "zodiac", "astrology", "recipe",
+             "lyrics", "chords", "tab ", "mugshot"],
+}
+
+
+def get_all_exclude_words():
+    all_words = []
+    for words in EXCLUDE_CATEGORIES.values():
+        all_words.extend(words)
+    return all_words
+
+
+def is_excluded(text):
+    text_lower = text.lower()
+    for ex in get_all_exclude_words():
+        if ex in text_lower:
+            return True
+    return False
+
+
+def parse_traffic(t):
+    """将 '200K+' '5,000+' 等转为数字"""
+    if not t:
+        return 0
+    t = t.replace('+', '').replace(',', '').strip()
+    if 'M' in t.upper():
+        return int(float(t.upper().replace('M', '')) * 1000000)
+    elif 'K' in t.upper():
+        return int(float(t.upper().replace('K', '')) * 1000)
+    try:
+        return int(t)
+    except ValueError:
+        return 0
+
 
 # ── 配置 ──────────────────────────────────────────────────────
 CONFIG_PATH = Path(__file__).parent / "config.json"
@@ -38,7 +116,126 @@ def load_config():
         return json.load(f)
 
 
-# ── 数据抓取 ──────────────────────────────────────────────────
+# ── 时下流行采集（所有地区）─────────────────────────────────────
+def fetch_all_trending():
+    """采集所有地区的时下流行，返回汇总数据"""
+    all_results = []
+
+    for name, code in ALL_REGIONS:
+        print(f"  📡 采集 {name} ({code})...")
+        try:
+            rss_url = f"https://trends.google.com/trending/rss?geo={code}"
+            resp = http_requests.get(rss_url, timeout=15, headers={
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            })
+
+            if resp.status_code == 200:
+                root = ET.fromstring(resp.content)
+                ns = {'ht': 'https://trends.google.com/trending/rss'}
+                count = 0
+
+                for item in root.iter('item'):
+                    title_el = item.find('title')
+                    traffic_el = item.find('ht:approx_traffic', ns)
+                    title = title_el.text if title_el is not None else ''
+                    traffic = traffic_el.text if traffic_el is not None else ''
+
+                    # 过滤
+                    if is_excluded(title):
+                        continue
+
+                    # 搜索量 > 5000
+                    traffic_num = parse_traffic(traffic)
+                    if traffic_num <= 5000:
+                        continue
+
+                    all_results.append({
+                        'title': title,
+                        'traffic': traffic,
+                        'traffic_num': traffic_num,
+                        'region': name,
+                        'region_code': code,
+                    })
+                    count += 1
+
+                print(f"    -> {count} 条有效数据")
+            else:
+                print(f"    -> HTTP {resp.status_code}")
+
+        except Exception as e:
+            print(f"    -> 失败: {e}")
+
+        time.sleep(2)  # 地区之间间隔2秒
+
+    return all_results
+
+
+# ── 飞书通知（统一发送）────────────────────────────────────────
+def send_trending_feishu(webhook_url, all_results):
+    """所有地区汇总后统一发一条飞书消息"""
+    now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+
+    # 按搜索量排序
+    all_results.sort(key=lambda x: x['traffic_num'], reverse=True)
+
+    # 按地区分组统计
+    region_counts = {}
+    for r in all_results:
+        region_counts[r['region']] = region_counts.get(r['region'], 0) + 1
+
+    # 汇总信息
+    content_lines = [
+        [{"tag": "text", "text": f"📅 {now}\n共采集 {len(ALL_REGIONS)} 个地区，找到 {len(all_results)} 条热搜（搜索量>5000）"}],
+        [{"tag": "text", "text": "\n".join([f"  {k}: {v}条" for k, v in region_counts.items()])}],
+        [{"tag": "text", "text": "\n📊 全球 Top 20 热搜:"}],
+    ]
+
+    # Top 20
+    for item in all_results[:20]:
+        line = f"{item['title']}  ({item['traffic']})  [{item['region']}]"
+        content_lines.append([{"tag": "text", "text": line}])
+
+    payload = {
+        "msg_type": "post",
+        "content": {"post": {"zh_cn": {
+            "title": "🔥 全球时下流行趋势报告",
+            "content": content_lines,
+        }}}
+    }
+
+    try:
+        resp = http_requests.post(webhook_url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            print("✅ 飞书汇总通知发送成功")
+        else:
+            print(f"❌ 飞书通知失败: {resp.status_code} {resp.text}")
+    except Exception as e:
+        print(f"❌ 飞书通知异常: {e}")
+
+    # 逐条发送 Top 10 详情
+    for item in all_results[:10]:
+        lines = [
+            "⚠ 监测到热门话题",
+            "",
+            f"话题: {item['title']}",
+            f"搜索量: {item['traffic']}",
+            f"地区: {item['region']}",
+        ]
+        detail_payload = {
+            "msg_type": "post",
+            "content": {"post": {"zh_cn": {
+                "title": f"📊 {item['title'][:30]}",
+                "content": [[{"tag": "text", "text": "\n".join(lines)}]],
+            }}}
+        }
+        try:
+            http_requests.post(webhook_url, json=detail_payload, timeout=10)
+            time.sleep(0.5)
+        except Exception:
+            pass
+
+
+# ── 爆增词采集 ────────────────────────────────────────────────
 def fetch_rising_queries(config):
     """抓取所有关键词的 rising queries"""
     kw_list = [kw.strip() for kw in config["keywords"] if kw.strip()]
@@ -108,7 +305,6 @@ def analyze_spikes(all_rising, config):
     combined = pd.concat(all_rising, ignore_index=True)
     combined['value_num'] = pd.to_numeric(combined['value'], errors='coerce')
 
-    # 取 top N 做趋势验证
     spike_top_n = config.get("spike_top_n", 20)
     temp = combined.copy()
     max_v = temp['value_num'].max()
@@ -158,118 +354,27 @@ def analyze_spikes(all_rising, config):
         if bi < len(batches) - 1:
             time.sleep(interval + random.uniform(0, 2))
 
-    # 合并趋势标签
     combined['趋势'] = combined['query'].map(lambda q: spike_results.get(q, ''))
-
     return combined, spike_results
 
 
-# ── 保存结果 ──────────────────────────────────────────────────
-def save_csv(combined):
-    output_dir = Path(__file__).parent / "output"
-    output_dir.mkdir(exist_ok=True)
-    filename = f"trending_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-    filepath = output_dir / filename
-
-    display = combined[['query', 'value', '趋势', 'keyword']].copy()
-    display['增长量'] = display['value'].apply(lambda v: f'+{v}%' if str(v).isdigit() else '飙升')
-    display = display.rename(columns={'query': '爆词', 'keyword': '来源词根'})
-    display = display[['爆词', '增长量', '趋势', '来源词根']]
-    display = display.sort_values(
-        by='增长量',
-        key=lambda s: s.str.replace(r'[+%]', '', regex=True).apply(
-            lambda x: float(x) if x.replace('.', '').isdigit() else float('inf')
-        ),
-        ascending=False
-    )
-    display.to_csv(filepath, index=False, encoding='utf-8-sig')
-    print(f"结果已保存: {filepath}")
-    return filepath, display
-
-
-# ── 构建通知消息 ──────────────────────────────────────────────
-def build_message(combined, spike_results, failed):
-    """构建通知消息文本"""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+def send_rising_feishu(webhook_url, combined, spike_results, failed):
+    """发送爆增词飞书通知"""
+    import pandas as pd
+    now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
     total = len(combined)
     sources = combined['keyword'].nunique()
     new_count = sum(1 for v in spike_results.values() if v == '新词飙升')
     spike_count = sum(1 for v in spike_results.values() if v == '近日飙升')
 
-    lines = [
-        f"🔥 热点关键词趋势报告",
-        f"📅 {now}",
-        f"",
-        f"共找到 {total} 个上升词，来自 {sources} 个词根",
-    ]
-
-    if new_count > 0:
-        lines.append(f"✨ {new_count} 个新词飙升")
-    if spike_count > 0:
-        lines.append(f"🔥 {spike_count} 个近日飙升")
-
-    # Top 15
-    lines.append("")
-    lines.append("📊 Top 15 爆增词:")
-    lines.append("")
-
-    import pandas as pd
     combined['_sort'] = pd.to_numeric(combined['value'], errors='coerce')
     max_v = combined['_sort'].max()
     combined.loc[combined['_sort'].isna(), '_sort'] = (max_v * 2) if pd.notna(max_v) else 999999
     top = combined.nlargest(15, '_sort')
 
-    for _, row in top.iterrows():
-        val = row['value']
-        growth = f'+{val}%' if str(val).isdigit() else '飙升'
-        trend_tag = ''
-        if row.get('趋势') == '新词飙升':
-            trend_tag = ' ✨新词'
-        elif row.get('趋势') == '近日飙升':
-            trend_tag = ' 🔥飙升'
-        lines.append(f"  {row['query']}  ({growth}){trend_tag}  ← {row['keyword']}")
-
-    if failed:
-        lines.append("")
-        lines.append(f"⚠️ {len(failed)} 个词查询失败: {', '.join(failed[:5])}")
-
-    combined.drop(columns=['_sort'], inplace=True)
-    return "\n".join(lines)
-
-
-# ── 飞书通知 ──────────────────────────────────────────────────
-def send_feishu(webhook_url, message):
-    """发送飞书群机器人通知"""
-    payload = {
-        "msg_type": "text",
-        "content": {"text": message}
-    }
-    resp = http_requests.post(webhook_url, json=payload, timeout=10)
-    if resp.status_code == 200:
-        print("✅ 飞书通知发送成功")
-    else:
-        print(f"❌ 飞书通知失败: {resp.status_code} {resp.text}")
-
-
-def send_feishu_rich(webhook_url, message, combined, spike_results):
-    """发送飞书富文本通知（带格式）"""
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    total = len(combined)
-    sources = combined['keyword'].nunique()
-    new_count = sum(1 for v in spike_results.values() if v == '新词飙升')
-    spike_count = sum(1 for v in spike_results.values() if v == '近日飙升')
-
-    import pandas as pd
-    combined['_sort'] = pd.to_numeric(combined['value'], errors='coerce')
-    max_v = combined['_sort'].max()
-    combined.loc[combined['_sort'].isna(), '_sort'] = (max_v * 2) if pd.notna(max_v) else 999999
-    top = combined.nlargest(15, '_sort')
-
-    # 构建富文本内容
     content_lines = [
         [{"tag": "text", "text": f"📅 {now}\n共找到 {total} 个上升词，来自 {sources} 个词根"}],
     ]
-
     if new_count > 0 or spike_count > 0:
         summary = ""
         if new_count > 0:
@@ -289,23 +394,20 @@ def send_feishu_rich(webhook_url, message, combined, spike_results):
         elif row.get('趋势') == '近日飙升':
             trend_tag = ' 🔥飙升'
         content_lines.append([
-            {"tag": "text", "text": f"{row['query']}  "},
-            {"tag": "text", "text": f"({growth}){trend_tag}"},
-            {"tag": "text", "text": f"  ← {row['keyword']}"},
+            {"tag": "text", "text": f"{row['query']}  ({growth}){trend_tag}  ← {row['keyword']}"},
         ])
 
     combined.drop(columns=['_sort'], inplace=True)
 
+    if failed:
+        content_lines.append([{"tag": "text", "text": f"\n⚠️ {len(failed)} 个词查询失败"}])
+
     payload = {
         "msg_type": "post",
-        "content": {
-            "post": {
-                "zh_cn": {
-                    "title": "🔥 热点关键词趋势报告",
-                    "content": content_lines,
-                }
-            }
-        }
+        "content": {"post": {"zh_cn": {
+            "title": "🔍 爆增词追踪报告",
+            "content": content_lines,
+        }}}
     }
     resp = http_requests.post(webhook_url, json=payload, timeout=10)
     if resp.status_code == 200:
@@ -314,120 +416,66 @@ def send_feishu_rich(webhook_url, message, combined, spike_results):
         print(f"❌ 飞书通知失败: {resp.status_code} {resp.text}")
 
 
-# ── 企业微信通知 ──────────────────────────────────────────────
-def send_wecom(webhook_url, message):
-    """发送企业微信群机器人通知"""
-    # 企业微信 markdown 限制 4096 字节，超长截断
-    if len(message.encode('utf-8')) > 4000:
-        message = message[:1300] + "\n\n... (更多结果请查看 CSV 文件)"
-
-    payload = {
-        "msgtype": "text",
-        "text": {"content": message}
-    }
-    resp = http_requests.post(webhook_url, json=payload, timeout=10)
-    if resp.status_code == 200:
-        data = resp.json()
-        if data.get("errcode") == 0:
-            print("✅ 企业微信通知发送成功")
-        else:
-            print(f"❌ 企业微信通知失败: {data}")
-    else:
-        print(f"❌ 企业微信通知失败: {resp.status_code}")
-
-
-# ── Server酱 (个人微信) ──────────────────────────────────────
-def send_serverchan(sendkey, title, message):
-    """通过 Server酱 推送到个人微信
-    注册: https://sct.ftqq.com/
-    """
-    url = f"https://sctapi.ftqq.com/{sendkey}.send"
-    payload = {"title": title, "desp": message.replace("\n", "\n\n")}
-    resp = http_requests.post(url, data=payload, timeout=10)
-    if resp.status_code == 200:
-        print("✅ Server酱通知发送成功")
-    else:
-        print(f"❌ Server酱通知失败: {resp.status_code} {resp.text}")
-
-
-# ── pushplus (个人微信) ──────────────────────────────────────
-def send_pushplus(token, title, message):
-    """通过 pushplus 推送到个人微信
-    注册: https://www.pushplus.plus/
-    """
-    url = "https://www.pushplus.plus/send"
-    payload = {
-        "token": token,
-        "title": title,
-        "content": message.replace("\n", "<br>"),
-        "template": "html",
-    }
-    resp = http_requests.post(url, json=payload, timeout=10)
-    if resp.status_code == 200:
-        print("✅ pushplus 通知发送成功")
-    else:
-        print(f"❌ pushplus 通知失败: {resp.status_code} {resp.text}")
-
-
-# ── 发送通知 ──────────────────────────────────────────────────
-def send_notifications(config, message, combined, spike_results):
-    """根据配置发送所有通知"""
-    notify = config.get("notify", {})
-
-    # 飞书
-    feishu_url = notify.get("feishu_webhook", "")
-    if feishu_url:
-        send_feishu_rich(feishu_url, message, combined, spike_results)
-
-    # 企业微信
-    wecom_url = notify.get("wecom_webhook", "")
-    if wecom_url:
-        send_wecom(wecom_url, message)
-
-    # Server酱
-    serverchan_key = notify.get("serverchan_sendkey", "")
-    if serverchan_key:
-        send_serverchan(serverchan_key, "🔥 热点关键词趋势报告", message)
-
-    # pushplus
-    pushplus_token = notify.get("pushplus_token", "")
-    if pushplus_token:
-        send_pushplus(pushplus_token, "🔥 热点关键词趋势报告", message)
-
-    if not any([feishu_url, wecom_url, serverchan_key, pushplus_token]):
-        print("⚠️ 未配置任何通知渠道，仅保存 CSV")
+# ── 保存结果 ──────────────────────────────────────────────────
+def save_trending_csv(all_results):
+    import pandas as pd
+    output_dir = Path(__file__).parent / "output"
+    output_dir.mkdir(exist_ok=True)
+    filename = f"trending_{datetime.now(BEIJING_TZ).strftime('%Y%m%d_%H%M')}.csv"
+    filepath = output_dir / filename
+    df = pd.DataFrame(all_results)
+    df.to_csv(filepath, index=False, encoding='utf-8-sig')
+    print(f"结果已保存: {filepath}")
+    return filepath
 
 
 # ── 主流程 ────────────────────────────────────────────────────
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--mode', choices=['trending', 'rising'], default='trending',
+                        help='trending=时下流行, rising=爆增词追踪')
+    args = parser.parse_args()
+
+    now_bj = datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
     print("=" * 50)
-    print(f"🔥 热点关键词趋势追踪 - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🔥 Google Trends 数据采集 - {now_bj} (北京时间)")
+    print(f"   模式: {args.mode}")
     print("=" * 50)
 
     config = load_config()
+    webhook = config.get("notify", {}).get("feishu_webhook", "")
 
-    # 1. 抓取
-    print("\n📡 开始抓取 rising queries...")
-    all_rising, failed = fetch_rising_queries(config)
+    if args.mode == 'trending':
+        # 时下流行 - 采集所有地区
+        print(f"\n📡 开始采集 {len(ALL_REGIONS)} 个地区的时下流行...")
+        all_results = fetch_all_trending()
 
-    if not all_rising:
-        print("❌ 未获取到任何数据")
-        return
+        if all_results:
+            save_trending_csv(all_results)
+            if webhook:
+                print("\n📮 发送飞书通知...")
+                send_trending_feishu(webhook, all_results)
+            print(f"\n✅ 完成! 共 {len(all_results)} 条有效热搜")
+        else:
+            print("❌ 未获取到任何数据")
 
-    # 2. 分析趋势
-    print("\n📊 分析趋势...")
-    combined, spike_results = analyze_spikes(all_rising, config)
+    elif args.mode == 'rising':
+        # 爆增词追踪
+        print("\n📡 开始抓取 rising queries...")
+        all_rising, failed = fetch_rising_queries(config)
 
-    # 3. 保存 CSV
-    print("\n💾 保存结果...")
-    csv_path, display_df = save_csv(combined)
+        if not all_rising:
+            print("❌ 未获取到任何数据")
+            return
 
-    # 4. 发送通知
-    print("\n📮 发送通知...")
-    message = build_message(combined, spike_results, failed)
-    send_notifications(config, message, combined, spike_results)
+        print("\n📊 分析趋势...")
+        combined, spike_results = analyze_spikes(all_rising, config)
 
-    print(f"\n✅ 完成! 共 {len(combined)} 个上升词，CSV: {csv_path}")
+        if webhook:
+            print("\n📮 发送飞书通知...")
+            send_rising_feishu(webhook, combined, spike_results, failed)
+
+        print(f"\n✅ 完成! 共 {len(combined)} 个上升词")
 
 
 if __name__ == "__main__":
