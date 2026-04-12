@@ -187,6 +187,12 @@ with st.sidebar:
 
     st.divider()
 
+    exclude_words = st.text_input("排除关键词（逗号分隔）",
+                                   value="casino, gambling, bet, slot, poker",
+                                   help="结果中包含这些词的会被自动过滤掉")
+
+    st.divider()
+
     spike_check = st.checkbox("验证近日突然飙升", value=True,
                                help="对 Top 爆增词二次查询趋势曲线，判断是近几天突然飙升还是持续增长")
     spike_top_n = st.slider("验证词数量", min_value=5, max_value=50, value=20,
@@ -379,6 +385,14 @@ if start and total_kw > 0:
     # ── 结果展示 ──────────────────────────────────────────────
     if all_rising:
             combined = pd.concat(all_rising, ignore_index=True)
+
+            # 过滤排除词
+            if exclude_words.strip():
+                exclude_list = [w.strip().lower() for w in exclude_words.split(",") if w.strip()]
+                combined = combined[~combined['query'].str.lower().apply(
+                    lambda q: any(ex in q for ex in exclude_list)
+                )].reset_index(drop=True)
+
             combined['value_num'] = pd.to_numeric(combined['value'], errors='coerce')
             has_numeric = combined['value_num'].notna()
             breakout_df = combined[~has_numeric].copy()
