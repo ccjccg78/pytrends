@@ -596,39 +596,76 @@ with tab2:
     if start_trending:
         with st.spinner("正在获取时下流行数据..."):
             try:
-                pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
-                trending_data = pytrend.today_searches(pn=trending_geo[1])
+                import xml.etree.ElementTree as ET
 
-                if trending_data is not None and len(trending_data) > 0:
-                    trending_df = pd.DataFrame({'title': trending_data.values})
+                # 使用 Google Trends RSS feed（最稳定）
+                rss_url = f"https://trends.google.com/trending/rss?geo={trending_geo[1]}"
+                resp = http_requests.get(rss_url, timeout=15, headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                })
 
-                    # 过滤
-                    original_count = len(trending_df)
-                    trending_df = filter_results(trending_df, 'title', exclude_words)
-                    filtered_count = original_count - len(trending_df)
+                if resp.status_code == 200:
+                    root = ET.fromstring(resp.content)
+                    items = []
+                    ns = {'ht': 'https://trends.google.com/trending/rss'}
 
-                    st.divider()
-                    st.subheader(f"📊 {trending_geo[0]} 今日热搜")
-                    st.markdown(f"**共 {len(trending_df)} 个话题**（已过滤 {filtered_count} 个不相关内容）")
+                    for item in root.iter('item'):
+                        title = item.find('title')
+                        traffic = item.find('ht:approx_traffic', ns)
+                        news_item = item.find('ht:news_item', ns)
+                        news_title = ''
+                        news_url = ''
+                        if news_item is not None:
+                            nt = news_item.find('ht:news_item_title', ns)
+                            nu = news_item.find('ht:news_item_url', ns)
+                            if nt is not None:
+                                news_title = nt.text or ''
+                            if nu is not None:
+                                news_url = nu.text or ''
 
-                    # 飞书通知
-                    if not trending_df.empty:
-                        notify_df = trending_df.copy()
-                        notify_df['keyword'] = trending_geo[0]
-                        notify_df['query'] = notify_df['title']
-                        if send_feishu_notify(notify_df, title=f"🔥 {trending_geo[0]}今日热搜"):
-                            st.success("✅ 飞书通知已发送")
+                        items.append({
+                            'title': title.text if title is not None else '',
+                            'traffic': traffic.text if traffic is not None else '',
+                            'news_title': news_title,
+                            'news_url': news_url,
+                        })
 
-                    # 展示
-                    for i, row in trending_df.iterrows():
-                        st.markdown(f"**{i+1}.** {row['title']}")
+                    if items:
+                        trending_df = pd.DataFrame(items)
 
-                    # 下载
-                    csv = trending_df.to_csv(index=False).encode('utf-8-sig')
-                    st.download_button("📥 下载 CSV", csv, "trending_now.csv", "text/csv", use_container_width=True)
+                        # 过滤
+                        original_count = len(trending_df)
+                        trending_df = filter_results(trending_df, 'title', exclude_words)
+                        filtered_count = original_count - len(trending_df)
 
+                        st.divider()
+                        st.subheader(f"📊 {trending_geo[0]} 今日热搜")
+                        st.markdown(f"**共 {len(trending_df)} 个话题**（已过滤 {filtered_count} 个不相关内容）")
+
+                        # 飞书通知
+                        if not trending_df.empty:
+                            notify_df = trending_df.copy()
+                            notify_df['keyword'] = trending_geo[0]
+                            notify_df['query'] = notify_df['title']
+                            notify_df['formattedTraffic'] = notify_df['traffic']
+                            if send_feishu_notify(notify_df, title=f"🔥 {trending_geo[0]}今日热搜"):
+                                st.success("✅ 飞书通知已发送")
+
+                        # 展示
+                        for i, row in trending_df.iterrows():
+                            traffic_info = f"  ({row['traffic']})" if row['traffic'] else ""
+                            st.markdown(f"**{i+1}.** {row['title']}{traffic_info}")
+                            if row['news_title']:
+                                st.caption(f"   相关新闻: {row['news_title']}")
+
+                        # 下载
+                        csv = trending_df.to_csv(index=False).encode('utf-8-sig')
+                        st.download_button("📥 下载 CSV", csv, "trending_now.csv", "text/csv", use_container_width=True)
+                    else:
+                        st.warning("未获取到时下流行数据，请稍后重试。")
                 else:
-                    st.warning("未获取到时下流行数据，请稍后重试。")
+                    st.error(f"获取失败: HTTP {resp.status_code}")
+                    st.info("提示：时下流行功能需要服务器能访问 Google Trends。")
 
             except Exception as e:
                 st.error(f"获取失败: {e}")
