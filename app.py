@@ -8,7 +8,10 @@ import random
 import json
 import re
 import requests as http_requests
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+# 北京时间 UTC+8
+BEIJING_TZ = timezone(timedelta(hours=8))
 from pathlib import Path
 from pytrends.request import TrendReq
 from pytrends.exceptions import TooManyRequestsError, ResponseError
@@ -70,7 +73,7 @@ def send_feishu_notify(combined, spike_results=None, title="🔥 热点关键词
     if not webhook:
         return False
 
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
     total = len(combined)
     sources = combined['keyword'].nunique() if 'keyword' in combined.columns else 0
 
