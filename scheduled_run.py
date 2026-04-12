@@ -477,17 +477,21 @@ def fetch_sitemap(url):
     return resp.text
 
 
+MAX_SUB_SITEMAPS = 20  # 最多展开20个子 sitemap，防止内存爆炸
+
+
 def parse_sitemap_urls(xml_content, follow_index=True):
-    """从 sitemap XML 中提取所有 URL，支持 sitemapindex 自动展开子 sitemap"""
+    """从 sitemap XML 中提取所有 URL，支持 sitemapindex 自动展开子 sitemap（最多20个）"""
     root = ET.fromstring(xml_content)
     ns = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
     urls = set()
     for loc in root.findall('.//ns:url/ns:loc', ns):
         if loc.text:
             urls.add(loc.text.strip())
-    # sitemapindex: 展开子 sitemap
+    # sitemapindex: 展开子 sitemap（限制数量）
     if follow_index and 'sitemapindex' in root.tag:
-        for loc in root.findall('.//ns:sitemap/ns:loc', ns):
+        sub_locs = root.findall('.//ns:sitemap/ns:loc', ns)
+        for loc in sub_locs[:MAX_SUB_SITEMAPS]:
             if loc.text:
                 try:
                     sub_resp = http_requests.get(loc.text.strip(), timeout=(10, 30), headers={

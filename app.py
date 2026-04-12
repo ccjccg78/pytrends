@@ -756,17 +756,20 @@ with tab3:
     SM_NS = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
     SM_HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
 
+    MAX_SUB_SITEMAPS = 20  # 最多展开20个子 sitemap，防止内存爆炸
+
     def parse_sitemap_all_urls(content, follow_index=True):
-        """解析 sitemap，支持 sitemapindex（自动展开子 sitemap）"""
+        """解析 sitemap，支持 sitemapindex（自动展开子 sitemap，最多展开20个）"""
         root = ET.fromstring(content)
         urls = set()
         # 直接的 <url><loc>
         for loc in root.findall('.//ns:url/ns:loc', SM_NS):
             if loc.text:
                 urls.add(loc.text.strip())
-        # 如果是 sitemapindex，展开子 sitemap
+        # 如果是 sitemapindex，展开子 sitemap（限制数量）
         if follow_index and 'sitemapindex' in root.tag:
-            for loc in root.findall('.//ns:sitemap/ns:loc', SM_NS):
+            sub_locs = root.findall('.//ns:sitemap/ns:loc', SM_NS)
+            for loc in sub_locs[:MAX_SUB_SITEMAPS]:
                 if loc.text:
                     try:
                         sub_resp = http_requests.get(loc.text.strip(), timeout=(10, 30), headers=SM_HEADERS)
