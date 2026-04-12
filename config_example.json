@@ -1,8 +1,22 @@
 {
     "keywords": [
-        "Translate", "Generator", "Example", "Convert", "Online",
-        "Downloader", "Maker", "Creator", "Editor", "Processor",
-        "Designer", "Compiler", "Analyzer", "Interpreter", "Calculator"
+        "Tool", "App", "Platform", "Studio", "Workspace", "Suite", "Hub", "Engine",
+        "Bot", "Agent", "Copilot", "Chat", "Search",
+        "Writer", "Rewriter", "Paraphraser", "Summarizer",
+        "Transcriber", "Transcription", "Captioner", "Subtitle",
+        "Enhancer", "Remover", "Compressor", "Resizer", "Upscaler",
+        "Automator", "Organizer", "Formatter", "Prompt",
+        "API", "Plugin", "Extension", "Integrator", "Launcher",
+        "Blog", "Update", "Trends", "Trending", "Insight",
+        "Report", "Research", "Review",
+        "Guide", "Tutorial", "Academy", "Learning", "Knowledge", "Wiki",
+        "Database", "Directory", "Library", "Collection", "Catalog",
+        "Showcase", "Gallery",
+        "Radar", "Ranking", "Roundup", "Brief", "Briefing", "Spotlight",
+        "Finder", "Discover", "Explore",
+        "Compare", "Comparison", "Alternatives", "Similar",
+        "Picks", "Recommendation", "Recommend",
+        "Open-source", "Enterprise"
     ],
 
     "geo": "",
