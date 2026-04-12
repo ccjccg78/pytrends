@@ -576,19 +576,19 @@ with tab2:
     st.caption("获取 Google Trends 实时热门搜索话题，自动过滤不适合做工具站/小游戏的内容")
 
     trending_geo = st.selectbox("采集地区", [
-        ("美国", "united_states"),
-        ("英国", "united_kingdom"),
-        ("日本", "japan"),
-        ("德国", "germany"),
-        ("法国", "france"),
-        ("加拿大", "canada"),
-        ("澳大利亚", "australia"),
-        ("印度", "india"),
-        ("巴西", "brazil"),
-        ("韩国", "south_korea"),
-        ("新加坡", "singapore"),
-        ("中国台湾", "taiwan"),
-        ("中国香港", "hong_kong"),
+        ("美国", "US"),
+        ("英国", "GB"),
+        ("日本", "JP"),
+        ("德国", "DE"),
+        ("法国", "FR"),
+        ("加拿大", "CA"),
+        ("澳大利亚", "AU"),
+        ("印度", "IN"),
+        ("巴西", "BR"),
+        ("韩国", "KR"),
+        ("新加坡", "SG"),
+        ("中国台湾", "TW"),
+        ("中国香港", "HK"),
     ], format_func=lambda x: x[0], index=0, key="trending_geo")
 
     start_trending = st.button("🔥 获取时下流行", type="primary", use_container_width=True)
@@ -597,10 +597,10 @@ with tab2:
         with st.spinner("正在获取时下流行数据..."):
             try:
                 pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
-                trending_df = pytrend.trending_searches(pn=trending_geo[1])
+                trending_data = pytrend.today_searches(pn=trending_geo[1])
 
-                if trending_df is not None and not trending_df.empty:
-                    trending_df.columns = ['title']
+                if trending_data is not None and len(trending_data) > 0:
+                    trending_df = pd.DataFrame({'title': trending_data.values})
 
                     # 过滤
                     original_count = len(trending_df)
@@ -608,7 +608,7 @@ with tab2:
                     filtered_count = original_count - len(trending_df)
 
                     st.divider()
-                    st.subheader(f"📊 {trending_geo[0]} 时下流行话题")
+                    st.subheader(f"📊 {trending_geo[0]} 今日热搜")
                     st.markdown(f"**共 {len(trending_df)} 个话题**（已过滤 {filtered_count} 个不相关内容）")
 
                     # 飞书通知
@@ -616,7 +616,7 @@ with tab2:
                         notify_df = trending_df.copy()
                         notify_df['keyword'] = trending_geo[0]
                         notify_df['query'] = notify_df['title']
-                        if send_feishu_notify(notify_df, title=f"🔥 {trending_geo[0]}时下流行"):
+                        if send_feishu_notify(notify_df, title=f"🔥 {trending_geo[0]}今日热搜"):
                             st.success("✅ 飞书通知已发送")
 
                     # 展示
