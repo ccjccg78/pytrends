@@ -11,6 +11,33 @@
     "request_interval": 8,
     "spike_top_n": 20,
 
+    "exclude_words": [],
+
+    "exclude_categories": {
+        "赌博": ["casino", "gambling", "gamble", "bet ", "betting", "slot machine", "poker", "roulette",
+                "blackjack", "lottery", "jackpot", "wager", "sportsbook"],
+        "人名/明星": ["wife", "husband", "boyfriend", "girlfriend", "married", "dating",
+                     "net worth", "birthday", "born", "died", "death", "funeral", "obituary",
+                     "son of", "daughter of", "who is", "how old"],
+        "体育": ["nba", "nfl", "nhl", "mlb", "fifa", "ufc", "boxing", "wrestling",
+                "playoff", "championship", "score", "highlights", "roster", "standings",
+                "draft pick", "super bowl", "world cup", "premier league", "la liga",
+                "serie a", "bundesliga", "vs ", " vs"],
+        "娱乐/影视": ["movie", "trailer", "episode", "season finale", "netflix", "hulu",
+                     "disney+", "box office", "premiere", "concert", "tour dates",
+                     "album release", "grammy", "oscar", "emmy"],
+        "新闻/时事": ["shooting", "earthquake", "hurricane", "tornado", "flood", "crash",
+                     "explosion", "protest", "riot", "scandal", "arrested", "convicted",
+                     "sentenced", "indicted", "breaking news", "election", "vote"],
+        "成人内容": ["porn", "xxx", "nude", "naked", "onlyfans", "nsfw", "adult video"],
+        "不相关": ["weather", "horoscope", "zodiac", "astrology", "recipe",
+                 "lyrics", "chords", "tab ", "mugshot"]
+    },
+
+    "sitemap_urls": [
+        "https://example.com/sitemap.xml"
+    ],
+
     "notify": {
         "feishu_webhook": "",
         "wecom_webhook": "",

@@ -4,14 +4,16 @@
 使用方式:
   1. 复制 config_example.json 为 config.json，填入你的配置
   2. 手动运行: python scheduled_run.py
-  3. 定时任务 (北京时间早上7点 = UTC 23:00):
+  3. 定时任务 (北京时间早上6点 = UTC 22:00):
      crontab -e 添加:
-     0 23 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode trending
+     0 22 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode trending
      0 1 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode rising
+     */30 * * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode sitemap
 
 支持模式:
   --mode trending  采集所有地区时下流行 (默认)
   --mode rising    采集关键词爆增词
+  --mode sitemap   监控竞品 Sitemap 变化
 """
 
 import json
@@ -50,8 +52,18 @@ ALL_REGIONS = [
     ("中国香港", "HK"),
 ]
 
-# 过滤词库
-EXCLUDE_CATEGORIES = {
+# 流量阈值（注意：RSS 的 approx_traffic 是短时搜索热度，非严格日搜索量）
+# 单次采集阈值：单次 approx_traffic > 1000 直接入选
+TRAFFIC_THRESHOLD = 1000
+# 累计阈值：同一话题连续3天累计 approx_traffic > 1000 也入选
+CUMULATIVE_DAYS = 3
+CUMULATIVE_THRESHOLD = 1000
+
+# 历史记录文件（用于跨天累计判断）
+HISTORY_PATH = Path(__file__).parent / "output" / "trending_history.json"
+
+# 默认过滤词库（可通过 config.json 的 exclude_categories 和 exclude_words 覆盖）
+DEFAULT_EXCLUDE_CATEGORIES = {
     "赌博": ["casino", "gambling", "gamble", "bet ", "betting", "slot machine", "poker", "roulette",
             "blackjack", "lottery", "jackpot", "wager", "sportsbook"],
     "人名/明星": ["wife", "husband", "boyfriend", "girlfriend", "married", "dating",
@@ -73,16 +85,23 @@ EXCLUDE_CATEGORIES = {
 }
 
 
-def get_all_exclude_words():
+def get_all_exclude_words(config=None):
+    """从 config 加载过滤词，config 未配置时使用默认值"""
+    categories = DEFAULT_EXCLUDE_CATEGORIES
+    if config and "exclude_categories" in config:
+        categories = config["exclude_categories"]
     all_words = []
-    for words in EXCLUDE_CATEGORIES.values():
+    for words in categories.values():
         all_words.extend(words)
+    # 额外排除词
+    if config and "exclude_words" in config:
+        all_words.extend([w.strip().lower() for w in config["exclude_words"] if w.strip()])
     return all_words
 
 
-def is_excluded(text):
+def is_excluded(text, config=None):
     text_lower = text.lower()
-    for ex in get_all_exclude_words():
+    for ex in get_all_exclude_words(config):
         if ex in text_lower:
             return True
     return False
@@ -116,10 +135,46 @@ def load_config():
         return json.load(f)
 
 
+# ── 历史记录（用于跨天累计）──────────────────────────────────────
+def load_history():
+    """加载历史记录，格式: { "话题|地区代码": [{"date": "2026-04-12", "traffic": 200}, ...] }"""
+    if HISTORY_PATH.exists():
+        with open(HISTORY_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+
+def save_history(history):
+    """保存历史记录，自动清理超过 CUMULATIVE_DAYS 天的旧数据"""
+    HISTORY_PATH.parent.mkdir(exist_ok=True)
+    cutoff = (datetime.now(BEIJING_TZ) - timedelta(days=CUMULATIVE_DAYS)).strftime("%Y-%m-%d")
+    # 清理过期记录
+    cleaned = {}
+    for key, records in history.items():
+        valid = [r for r in records if r["date"] >= cutoff]
+        if valid:
+            cleaned[key] = valid
+    with open(HISTORY_PATH, "w", encoding="utf-8") as f:
+        json.dump(cleaned, f, ensure_ascii=False, indent=2)
+
+
+def get_cumulative_traffic(history, key):
+    """计算某个话题在 CUMULATIVE_DAYS 天内的累计流量"""
+    records = history.get(key, [])
+    return sum(r["traffic"] for r in records)
+
+
 # ── 时下流行采集（所有地区）─────────────────────────────────────
-def fetch_all_trending():
-    """采集所有地区的时下流行，返回汇总数据"""
+def fetch_all_trending(config=None):
+    """采集所有地区的时下流行，返回汇总数据
+
+    入选条件（满足任一即可）：
+      1. 单次 approx_traffic > TRAFFIC_THRESHOLD (1000)
+      2. 同一话题近 CUMULATIVE_DAYS (3) 天累计 approx_traffic > CUMULATIVE_THRESHOLD (1000)
+    """
     all_results = []
+    history = load_history()
+    today = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d")
 
     for name, code in ALL_REGIONS:
         print(f"  📡 采集 {name} ({code})...")
@@ -140,19 +195,36 @@ def fetch_all_trending():
                     title = title_el.text if title_el is not None else ''
                     traffic = traffic_el.text if traffic_el is not None else ''
 
-                    # 过滤
-                    if is_excluded(title):
+                    # 关键词过滤（从 config.json 读取过滤规则）
+                    if is_excluded(title, config):
                         continue
 
-                    # 搜索量 > 5000
                     traffic_num = parse_traffic(traffic)
-                    if traffic_num <= 5000:
+                    history_key = f"{title.lower()}|{code}"
+
+                    # 记录到历史（不论是否入选，都记录以便累计）
+                    if history_key not in history:
+                        history[history_key] = []
+                    # 同一天同一话题只记录一次（取较大值）
+                    today_records = [r for r in history[history_key] if r["date"] == today]
+                    if today_records:
+                        today_records[0]["traffic"] = max(today_records[0]["traffic"], traffic_num)
+                    else:
+                        history[history_key].append({"date": today, "traffic": traffic_num})
+
+                    cumulative = get_cumulative_traffic(history, history_key)
+
+                    # 入选条件：单次 > 1000 或 3天累计 > 1000
+                    if traffic_num <= TRAFFIC_THRESHOLD and cumulative <= CUMULATIVE_THRESHOLD:
                         continue
 
+                    reason = "单次" if traffic_num > TRAFFIC_THRESHOLD else f"累计{CUMULATIVE_DAYS}天"
                     all_results.append({
                         'title': title,
                         'traffic': traffic,
                         'traffic_num': traffic_num,
+                        'cumulative_traffic': cumulative,
+                        'reason': reason,  # 备注入选原因
                         'region': name,
                         'region_code': code,
                     })
@@ -167,6 +239,9 @@ def fetch_all_trending():
 
         time.sleep(2)  # 地区之间间隔2秒
 
+    # 保存历史记录
+    save_history(history)
+
     return all_results
 
 
@@ -180,13 +255,14 @@ def send_trending_feishu(webhook_url, all_results):
 
     # 汇总信息
     content_lines = [
-        [{"tag": "text", "text": f"📅 {now}\n共采集 {len(ALL_REGIONS)} 个地区，找到 {len(all_results)} 条热搜（搜索量>5000）"}],
+        [{"tag": "text", "text": f"📅 {now}\n共采集 {len(ALL_REGIONS)} 个地区，找到 {len(all_results)} 条热搜（单次>{TRAFFIC_THRESHOLD} 或 {CUMULATIVE_DAYS}天累计>{CUMULATIVE_THRESHOLD}）"}],
         [{"tag": "text", "text": "\n📊 全球热搜:"}],
     ]
 
-    # 所有结果列表，每行: 话题 (搜索量) ← 地区
+    # 所有结果列表，每行: 话题 (搜索量) [入选原因] ← 地区
     for item in all_results:
-        line = f"{item['title']}  ({item['traffic']})  ← {item['region']}"
+        tag = f"[{item.get('reason', '')}]" if item.get('reason') else ""
+        line = f"{item['title']}  ({item['traffic']}) {tag}  ← {item['region']}"
         content_lines.append([{"tag": "text", "text": line}])
 
     payload = {
@@ -388,6 +464,111 @@ def send_rising_feishu(webhook_url, combined, spike_results, failed):
         print(f"❌ 飞书通知失败: {resp.status_code} {resp.text}")
 
 
+# ── Sitemap 监控 ─────────────────────────────────────────────
+SITEMAP_DIR = Path(__file__).parent / "output" / "sitemaps"
+
+
+def fetch_sitemap(url):
+    """下载 sitemap XML 内容"""
+    resp = http_requests.get(url, timeout=15, headers={
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+    })
+    resp.raise_for_status()
+    return resp.text
+
+
+def parse_sitemap_urls(xml_content):
+    """从 sitemap XML 中提取所有 URL"""
+    root = ET.fromstring(xml_content)
+    ns = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+    urls = set()
+    for loc in root.findall('.//ns:url/ns:loc', ns):
+        if loc.text:
+            urls.add(loc.text.strip())
+    return urls
+
+
+def check_sitemaps(config):
+    """检查所有监控的 sitemap，返回各站点新增 URL"""
+    sitemap_urls = config.get("sitemap_urls", [])
+    if not sitemap_urls:
+        print("未配置 sitemap_urls，跳过")
+        return {}
+
+    SITEMAP_DIR.mkdir(parents=True, exist_ok=True)
+    all_changes = {}
+
+    for url in sitemap_urls:
+        domain = url.split("//")[-1].split("/")[0]
+        print(f"  📡 检查 {domain}...")
+
+        try:
+            new_content = fetch_sitemap(url)
+            new_urls = parse_sitemap_urls(new_content)
+
+            # 读取上次保存的 sitemap
+            cache_file = SITEMAP_DIR / f"{domain}.xml"
+            old_urls = set()
+            if cache_file.exists():
+                old_content = cache_file.read_text(encoding='utf-8')
+                old_urls = parse_sitemap_urls(old_content)
+
+            # 对比差异
+            added = new_urls - old_urls
+            if added:
+                all_changes[domain] = {
+                    'url': url,
+                    'new_urls': sorted(added),
+                    'total': len(new_urls),
+                    'old_total': len(old_urls),
+                }
+                print(f"    -> 发现 {len(added)} 个新 URL（总计 {len(old_urls)} -> {len(new_urls)}）")
+            else:
+                print(f"    -> 无变化（共 {len(new_urls)} 个 URL）")
+
+            # 保存最新版本
+            cache_file.write_text(new_content, encoding='utf-8')
+
+        except Exception as e:
+            print(f"    -> 失败: {e}")
+
+    return all_changes
+
+
+def send_sitemap_feishu(webhook_url, all_changes):
+    """推送 sitemap 变化到飞书"""
+    now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+
+    total_new = sum(len(v['new_urls']) for v in all_changes.values())
+    content_lines = [
+        [{"tag": "text", "text": f"📅 {now}\n监控 {len(all_changes)} 个站点有更新，共 {total_new} 个新页面"}],
+    ]
+
+    for domain, info in all_changes.items():
+        content_lines.append([{"tag": "text", "text": f"\n🌐 {domain}（{info['old_total']} -> {info['total']}）:"}])
+        for u in info['new_urls'][:20]:
+            content_lines.append([{"tag": "text", "text": f"  {u}"}])
+        if len(info['new_urls']) > 20:
+            content_lines.append([{"tag": "text", "text": f"  ...等共 {len(info['new_urls'])} 个新 URL"}])
+
+    payload = {
+        "msg_type": "post",
+        "content": {"post": {"zh_cn": {
+            "title": "🗺 Sitemap 监控报告",
+            "content": content_lines,
+        }}}
+    }
+
+    try:
+        resp = http_requests.post(webhook_url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            print("✅ 飞书 Sitemap 通知发送成功")
+        else:
+            print(f"❌ 飞书通知失败: {resp.status_code} {resp.text}")
+    except Exception as e:
+        print(f"❌ 飞书通知异常: {e}")
+
+
 # ── 保存结果 ──────────────────────────────────────────────────
 def save_trending_csv(all_results):
     import pandas as pd
@@ -404,8 +585,8 @@ def save_trending_csv(all_results):
 # ── 主流程 ────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=['trending', 'rising'], default='trending',
-                        help='trending=时下流行, rising=爆增词追踪')
+    parser.add_argument('--mode', choices=['trending', 'rising', 'sitemap'], default='trending',
+                        help='trending=时下流行, rising=爆增词追踪, sitemap=Sitemap监控')
     args = parser.parse_args()
 
     now_bj = datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
@@ -420,7 +601,7 @@ def main():
     if args.mode == 'trending':
         # 时下流行 - 采集所有地区
         print(f"\n📡 开始采集 {len(ALL_REGIONS)} 个地区的时下流行...")
-        all_results = fetch_all_trending()
+        all_results = fetch_all_trending(config)
 
         if all_results:
             save_trending_csv(all_results)
@@ -448,6 +629,21 @@ def main():
             send_rising_feishu(webhook, combined, spike_results, failed)
 
         print(f"\n✅ 完成! 共 {len(combined)} 个上升词")
+
+    elif args.mode == 'sitemap':
+        # Sitemap 监控
+        sitemap_urls = config.get("sitemap_urls", [])
+        print(f"\n🗺 开始检查 {len(sitemap_urls)} 个 Sitemap...")
+        all_changes = check_sitemaps(config)
+
+        if all_changes:
+            total_new = sum(len(v['new_urls']) for v in all_changes.values())
+            if webhook:
+                print("\n📮 发送飞书通知...")
+                send_sitemap_feishu(webhook, all_changes)
+            print(f"\n✅ 完成! {len(all_changes)} 个站点有更新，共 {total_new} 个新 URL")
+        else:
+            print("✅ 所有站点无变化")
 
 
 if __name__ == "__main__":

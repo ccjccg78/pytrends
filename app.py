@@ -16,8 +16,19 @@ from pathlib import Path
 from pytrends.request import TrendReq
 from pytrends.exceptions import TooManyRequestsError, ResponseError
 
-# ── 不适合做工具站/小游戏/资讯的过滤词库 ─────────────────────────
-EXCLUDE_CATEGORIES = {
+# ── 加载配置 ─────────────────────────────────────────────────
+def load_full_config():
+    """加载完整配置文件"""
+    config_path = Path(__file__).parent / "config.json"
+    if config_path.exists():
+        with open(config_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {}
+
+APP_CONFIG = load_full_config()
+
+# 默认过滤词库（config.json 未配置时使用）
+DEFAULT_EXCLUDE_CATEGORIES = {
     "赌博": ["casino", "gambling", "gamble", "bet ", "betting", "slot machine", "poker", "roulette",
             "blackjack", "lottery", "jackpot", "wager", "sportsbook"],
     "人名/明星": ["wife", "husband", "boyfriend", "girlfriend", "married", "dating",
@@ -38,11 +49,19 @@ EXCLUDE_CATEGORIES = {
              "lyrics", "chords", "tab ", "mugshot"],
 }
 
+# 从 config.json 读取过滤分类，未配置则用默认值
+EXCLUDE_CATEGORIES = APP_CONFIG.get("exclude_categories", DEFAULT_EXCLUDE_CATEGORIES)
+
 def get_all_exclude_words(custom_excludes=""):
-    """合并所有过滤词"""
+    """合并所有过滤词（config 分类 + 额外排除词）"""
     all_words = []
     for words in EXCLUDE_CATEGORIES.values():
         all_words.extend(words)
+    # config.json 中的额外排除词
+    for w in APP_CONFIG.get("exclude_words", []):
+        if w.strip():
+            all_words.append(w.strip().lower())
+    # UI 输入的额外排除词
     if custom_excludes.strip():
         all_words.extend([w.strip().lower() for w in custom_excludes.split(",") if w.strip()])
     return all_words
@@ -182,8 +201,14 @@ with st.sidebar:
             run_time_2 = st.time_input("第 2 次", value=pd.Timestamp("20:00").time(), key="t2")
             st.caption("建议早晚各一次，如 8:00 和 20:00")
         elif freq == 'daily_1':
-            run_time = st.time_input("执行时间", value=pd.Timestamp("09:00").time())
-            st.caption("建议 8:00-10:00，数据更新及时")
+            run_time = st.selectbox("执行时间", [
+                ("06:00", "06:00"),
+                ("07:00", "07:00"),
+                ("08:00", "08:00"),
+                ("09:00", "09:00"),
+                ("10:00", "10:00"),
+            ], format_func=lambda x: x[0], index=1)
+            st.caption("建议 6:00-8:00，数据更新及时")
         elif freq == 'weekly_1':
             run_day = st.selectbox("执行日", ["周一", "周二", "周三", "周四", "周五", "周六", "周日"], index=0)
             run_time = st.time_input("执行时间", value=pd.Timestamp("09:00").time())
@@ -248,17 +273,17 @@ with st.sidebar:
     request_interval = st.slider("请求间隔（秒）", min_value=2, max_value=300, value=5,
                                   help="每次请求之间的基础等待时间，优先级最高")
 
-    max_rpm = st.slider("每分钟最大请求数", min_value=1, max_value=10, value=8,
-                         help="频率上限，超过时自动暂停等待")
-
     st.divider()
 
+    # 额外排除词（config.json 中的 exclude_words 会自动加载）
+    config_exclude_str = ", ".join(APP_CONFIG.get("exclude_words", []))
     exclude_words = st.text_input("额外排除词（逗号分隔）",
-                                   value="",
-                                   help="除内置过滤（赌博/人名/体育/娱乐/新闻/成人）外，额外排除的词")
+                                   value=config_exclude_str,
+                                   help="除内置过滤分类外，额外排除的词。修改 config.json 的 exclude_words 可永久保存")
 
+    category_names = " / ".join(EXCLUDE_CATEGORIES.keys())
     st.markdown("**内置过滤分类：**")
-    st.caption("赌博 / 人名明星 / 体育 / 娱乐影视 / 新闻时事 / 成人内容 / 不相关内容")
+    st.caption(f"{category_names}（可在 config.json 的 exclude_categories 中修改）")
 
     st.divider()
 
@@ -288,12 +313,14 @@ with tab1:
     st.title("🔍 热点关键词趋势追踪")
     st.caption("输入一批关键词，自动查询每个词在 Google Trends 上近期增长最快的相关搜索词")
 
-    default_keywords = (
-        "Translate, Generator, Example, Convert, Online, Downloader, "
-        "Maker, Creator, Editor, Processor, Designer, Compiler, Analyzer, "
-        "Evaluator, Sender, Receiver, Interpreter, Uploader, Calculator, "
-        "Sample, Template, Format"
-    )
+    # 从 config.json 读取关键词，未配置则用默认值
+    config_keywords = APP_CONFIG.get("keywords", [
+        "Translate", "Generator", "Example", "Convert", "Online", "Downloader",
+        "Maker", "Creator", "Editor", "Processor", "Designer", "Compiler", "Analyzer",
+        "Evaluator", "Sender", "Receiver", "Interpreter", "Uploader", "Calculator",
+        "Sample", "Template", "Format"
+    ])
+    default_keywords = ", ".join(config_keywords)
 
     keywords_input = st.text_area(
         "输入关键词（用逗号或换行分隔）",
@@ -307,7 +334,7 @@ with tab1:
     total_kw = len(kw_list)
 
     if total_kw > 0:
-        effective_interval = max(request_interval, 60.0 / max_rpm)
+        effective_interval = request_interval
         est_time = total_kw * effective_interval / 60
         st.info(f"共 **{total_kw}** 个词根，预计用时约 **{est_time:.1f}** 分钟（间隔 {effective_interval:.0f} 秒）")
 
@@ -316,7 +343,7 @@ with tab1:
     if start and total_kw > 0:
         all_rising = []
         failed_kw = []
-        effective_interval = max(request_interval, 60.0 / max_rpm)
+        effective_interval = request_interval
 
         progress_bar = st.progress(0, text="准备开始...")
         status_area = st.empty()
@@ -642,7 +669,7 @@ with tab2:
                         st.subheader(f"📊 {trending_geo[0]} 今日热搜")
                         st.markdown(f"**共 {len(trending_df)} 个话题**（已过滤 {filtered_count} 个不相关内容）")
 
-                        # 飞书通知（只推送搜索量 > 5000 的）
+                        # 飞书通知（只推送搜索量 > 1000 的）
                         def parse_traffic(t):
                             """将 '200K+' '5,000+' 等转为数字"""
                             if not t:
@@ -660,16 +687,16 @@ with tab2:
                         if not trending_df.empty:
                             notify_df = trending_df.copy()
                             notify_df['_traffic_num'] = notify_df['traffic'].apply(parse_traffic)
-                            notify_df = notify_df[notify_df['_traffic_num'] > 5000].copy()
+                            notify_df = notify_df[notify_df['_traffic_num'] > 1000].copy()
                             if not notify_df.empty:
                                 notify_df['keyword'] = trending_geo[0]
                                 notify_df['query'] = notify_df['title']
                                 notify_df['formattedTraffic'] = notify_df['traffic']
                                 notify_df = notify_df.drop(columns=['_traffic_num'])
                                 if send_feishu_notify(notify_df, title=f"🔥 {trending_geo[0]}今日热搜"):
-                                    st.success(f"✅ 飞书通知已发送（{len(notify_df)} 条搜索量>5000）")
+                                    st.success(f"✅ 飞书通知已发送（{len(notify_df)} 条搜索量>1000）")
                             else:
-                                st.info("没有搜索量超过 5000 的话题，跳过飞书推送")
+                                st.info("没有搜索量超过 1000 的话题，跳过飞书推送")
 
                         # 展示
                         for i, row in trending_df.iterrows():
