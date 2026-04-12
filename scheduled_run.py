@@ -477,14 +477,27 @@ def fetch_sitemap(url):
     return resp.text
 
 
-def parse_sitemap_urls(xml_content):
-    """从 sitemap XML 中提取所有 URL"""
+def parse_sitemap_urls(xml_content, follow_index=True):
+    """从 sitemap XML 中提取所有 URL，支持 sitemapindex 自动展开子 sitemap"""
     root = ET.fromstring(xml_content)
     ns = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
     urls = set()
     for loc in root.findall('.//ns:url/ns:loc', ns):
         if loc.text:
             urls.add(loc.text.strip())
+    # sitemapindex: 展开子 sitemap
+    if follow_index and 'sitemapindex' in root.tag:
+        for loc in root.findall('.//ns:sitemap/ns:loc', ns):
+            if loc.text:
+                try:
+                    sub_resp = http_requests.get(loc.text.strip(), timeout=(10, 30), headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                    })
+                    if sub_resp.status_code == 200:
+                        sub_urls = parse_sitemap_urls(sub_resp.text, follow_index=False)
+                        urls.update(sub_urls)
+                except Exception:
+                    pass
     return urls
 
 
@@ -506,12 +519,11 @@ def check_sitemaps(config):
             new_content = fetch_sitemap(url)
             new_urls = parse_sitemap_urls(new_content)
 
-            # 读取上次保存的 sitemap
-            cache_file = SITEMAP_DIR / f"{domain}.xml"
+            # 读取上次保存的 URL 列表
+            cache_file = SITEMAP_DIR / f"{domain}.json"
             old_urls = set()
             if cache_file.exists():
-                old_content = cache_file.read_text(encoding='utf-8')
-                old_urls = parse_sitemap_urls(old_content)
+                old_urls = set(json.loads(cache_file.read_text(encoding='utf-8')))
 
             # 对比差异
             added = new_urls - old_urls
@@ -526,8 +538,8 @@ def check_sitemaps(config):
             else:
                 print(f"    -> 无变化（共 {len(new_urls)} 个 URL）")
 
-            # 保存最新版本
-            cache_file.write_text(new_content, encoding='utf-8')
+            # 保存 URL 列表（JSON 格式，下次对比不需要重新展开子 sitemap）
+            cache_file.write_text(json.dumps(sorted(new_urls), ensure_ascii=False), encoding='utf-8')
 
         except Exception as e:
             print(f"    -> 失败: {e}")

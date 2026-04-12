@@ -753,6 +753,29 @@ with tab3:
     from urllib.parse import urlparse
 
     SITEMAP_DIR = Path(__file__).parent / "output" / "sitemaps"
+    SM_NS = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
+    SM_HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+
+    def parse_sitemap_all_urls(content, follow_index=True):
+        """解析 sitemap，支持 sitemapindex（自动展开子 sitemap）"""
+        root = ET.fromstring(content)
+        urls = set()
+        # 直接的 <url><loc>
+        for loc in root.findall('.//ns:url/ns:loc', SM_NS):
+            if loc.text:
+                urls.add(loc.text.strip())
+        # 如果是 sitemapindex，展开子 sitemap
+        if follow_index and 'sitemapindex' in root.tag:
+            for loc in root.findall('.//ns:sitemap/ns:loc', SM_NS):
+                if loc.text:
+                    try:
+                        sub_resp = http_requests.get(loc.text.strip(), timeout=(10, 30), headers=SM_HEADERS)
+                        if sub_resp.status_code == 200:
+                            sub_urls = parse_sitemap_all_urls(sub_resp.text, follow_index=False)
+                            urls.update(sub_urls)
+                    except Exception:
+                        pass
+        return urls
 
     # 从 config.json 读取已配置的 sitemap URL
     config_sitemaps = APP_CONFIG.get("sitemap_urls", [])
@@ -762,7 +785,7 @@ with tab3:
     if config_sitemaps:
         for i, url in enumerate(config_sitemaps):
             domain = urlparse(url).netloc
-            cache_file = SITEMAP_DIR / f"{domain}.xml"
+            cache_file = SITEMAP_DIR / f"{domain}.json"
             status = "✅ 已有快照" if cache_file.exists() else "🆕 待首次采集"
             col_url, col_del = st.columns([5, 1])
             with col_url:
@@ -819,26 +842,16 @@ with tab3:
             progress_bar.progress(i / total, text=f"检查 {domain}...")
 
             try:
-                resp = http_requests.get(url, timeout=(10, 30), headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                })
+                resp = http_requests.get(url, timeout=(10, 30), headers=SM_HEADERS)
                 resp.raise_for_status()
 
-                root = ET.fromstring(resp.content)
-                ns = {'ns': 'http://www.sitemaps.org/schemas/sitemap/0.9'}
-                new_urls = set()
-                for loc in root.findall('.//ns:url/ns:loc', ns):
-                    if loc.text:
-                        new_urls.add(loc.text.strip())
+                new_urls = parse_sitemap_all_urls(resp.text)
 
-                # 读取旧快照
-                cache_file = SITEMAP_DIR / f"{domain}.xml"
+                # 读取旧快照（用 JSON 存 URL 列表，避免重复展开子 sitemap）
+                cache_file = SITEMAP_DIR / f"{domain}.json"
                 old_urls = set()
                 if cache_file.exists():
-                    old_root = ET.fromstring(cache_file.read_text(encoding='utf-8'))
-                    for loc in old_root.findall('.//ns:url/ns:loc', ns):
-                        if loc.text:
-                            old_urls.add(loc.text.strip())
+                    old_urls = set(json.loads(cache_file.read_text(encoding='utf-8')))
 
                 added = new_urls - old_urls
                 if added:
@@ -848,8 +861,8 @@ with tab3:
                         'old_total': len(old_urls),
                     }
 
-                # 保存最新版本
-                cache_file.write_text(resp.text, encoding='utf-8')
+                # 保存 URL 列表
+                cache_file.write_text(json.dumps(sorted(new_urls), ensure_ascii=False), encoding='utf-8')
                 st.caption(f"✅ {domain} — {len(new_urls)} 个 URL")
 
             except Exception as e:
