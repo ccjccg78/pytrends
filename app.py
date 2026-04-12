@@ -776,25 +776,38 @@ with tab3:
     else:
         st.info("暂无监控站点，请在下方添加。")
 
-    # 添加新 sitemap
-    col_input, col_add = st.columns([4, 1])
-    with col_input:
-        new_sitemap_url = st.text_input("添加 Sitemap URL", placeholder="https://example.com/sitemap.xml",
-                                         label_visibility="collapsed")
-    with col_add:
-        if st.button("➕ 添加", key="add_sitemap"):
-            if new_sitemap_url.strip():
-                url_to_add = new_sitemap_url.strip()
-                if url_to_add not in config_sitemaps:
-                    config_sitemaps.append(url_to_add)
-                    APP_CONFIG["sitemap_urls"] = config_sitemaps
-                    save_config(APP_CONFIG)
-                    st.success(f"已添加")
-                    st.rerun()
-                else:
-                    st.warning("该 URL 已存在")
+    # 批量添加 sitemap
+    new_sitemap_urls = st.text_area("添加网站（每行一个，自动补全 /sitemap.xml）",
+                                     placeholder="https://example.com\nhttps://another-site.com/sitemap.xml",
+                                     height=100, key="sitemap_input")
+    if st.button("➕ 批量添加", key="add_sitemap"):
+        if new_sitemap_urls.strip():
+            added = 0
+            for line in new_sitemap_urls.strip().splitlines():
+                url = line.strip().rstrip("/")
+                if not url:
+                    continue
+                # 补全协议
+                if not url.startswith("http"):
+                    url = "https://" + url
+                # 去掉路径后缀（如 /es/category/new），只保留域名
+                parsed = urlparse(url)
+                base_url = f"{parsed.scheme}://{parsed.netloc}"
+                # 自动补全 /sitemap.xml
+                if not url.endswith(".xml"):
+                    url = base_url + "/sitemap.xml"
+                if url not in config_sitemaps:
+                    config_sitemaps.append(url)
+                    added += 1
+            if added > 0:
+                APP_CONFIG["sitemap_urls"] = config_sitemaps
+                save_config(APP_CONFIG)
+                st.success(f"已添加 {added} 个站点")
+                st.rerun()
             else:
-                st.warning("请输入 URL")
+                st.warning("没有新站点可添加（已存在或输入为空）")
+        else:
+            st.warning("请输入 URL")
 
     st.divider()
 
