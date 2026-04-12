@@ -470,7 +470,7 @@ SITEMAP_DIR = Path(__file__).parent / "output" / "sitemaps"
 
 def fetch_sitemap(url):
     """下载 sitemap XML 内容"""
-    resp = http_requests.get(url, timeout=15, headers={
+    resp = http_requests.get(url, timeout=(10, 30), headers={
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
     })
     resp.raise_for_status()

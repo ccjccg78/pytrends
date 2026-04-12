@@ -819,7 +819,7 @@ with tab3:
             progress_bar.progress(i / total, text=f"检查 {domain}...")
 
             try:
-                resp = http_requests.get(url, timeout=15, headers={
+                resp = http_requests.get(url, timeout=(10, 30), headers={
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
                 })
                 resp.raise_for_status()
@@ -850,9 +850,10 @@ with tab3:
 
                 # 保存最新版本
                 cache_file.write_text(resp.text, encoding='utf-8')
+                st.caption(f"✅ {domain} — {len(new_urls)} 个 URL")
 
             except Exception as e:
-                st.error(f"❌ {domain} 检查失败: {e}")
+                st.warning(f"⚠️ {domain} 跳过: {e}")
 
         progress_bar.progress(1.0, text="检查完成！")
 
