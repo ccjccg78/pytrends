@@ -642,14 +642,34 @@ with tab2:
                         st.subheader(f"📊 {trending_geo[0]} 今日热搜")
                         st.markdown(f"**共 {len(trending_df)} 个话题**（已过滤 {filtered_count} 个不相关内容）")
 
-                        # 飞书通知
+                        # 飞书通知（只推送搜索量 > 5000 的）
+                        def parse_traffic(t):
+                            """将 '200K+' '5,000+' 等转为数字"""
+                            if not t:
+                                return 0
+                            t = t.replace('+', '').replace(',', '').strip()
+                            if 'M' in t.upper():
+                                return int(float(t.upper().replace('M', '')) * 1000000)
+                            elif 'K' in t.upper():
+                                return int(float(t.upper().replace('K', '')) * 1000)
+                            try:
+                                return int(t)
+                            except ValueError:
+                                return 0
+
                         if not trending_df.empty:
                             notify_df = trending_df.copy()
-                            notify_df['keyword'] = trending_geo[0]
-                            notify_df['query'] = notify_df['title']
-                            notify_df['formattedTraffic'] = notify_df['traffic']
-                            if send_feishu_notify(notify_df, title=f"🔥 {trending_geo[0]}今日热搜"):
-                                st.success("✅ 飞书通知已发送")
+                            notify_df['_traffic_num'] = notify_df['traffic'].apply(parse_traffic)
+                            notify_df = notify_df[notify_df['_traffic_num'] > 5000].copy()
+                            if not notify_df.empty:
+                                notify_df['keyword'] = trending_geo[0]
+                                notify_df['query'] = notify_df['title']
+                                notify_df['formattedTraffic'] = notify_df['traffic']
+                                notify_df = notify_df.drop(columns=['_traffic_num'])
+                                if send_feishu_notify(notify_df, title=f"🔥 {trending_geo[0]}今日热搜"):
+                                    st.success(f"✅ 飞书通知已发送（{len(notify_df)} 条搜索量>5000）")
+                            else:
+                                st.info("没有搜索量超过 5000 的话题，跳过飞书推送")
 
                         # 展示
                         for i, row in trending_df.iterrows():
