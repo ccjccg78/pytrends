@@ -25,7 +25,14 @@ def load_full_config():
             return json.load(f)
     return {}
 
+CONFIG_PATH = Path(__file__).parent / "config.json"
 APP_CONFIG = load_full_config()
+
+
+def save_config(config):
+    """保存配置到 config.json"""
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(config, f, ensure_ascii=False, indent=4)
 
 # 默认过滤词库（config.json 未配置时使用）
 DEFAULT_EXCLUDE_CATEGORIES = {
@@ -279,11 +286,18 @@ with st.sidebar:
     config_exclude_str = ", ".join(APP_CONFIG.get("exclude_words", []))
     exclude_words = st.text_input("额外排除词（逗号分隔）",
                                    value=config_exclude_str,
-                                   help="除内置过滤分类外，额外排除的词。修改 config.json 的 exclude_words 可永久保存")
+                                   help="除内置过滤分类外，额外排除的词")
+
+    if st.button("💾 保存排除词", key="save_exclude"):
+        new_words = [w.strip() for w in exclude_words.split(",") if w.strip()]
+        APP_CONFIG["exclude_words"] = new_words
+        save_config(APP_CONFIG)
+        st.success("已保存")
+        st.rerun()
 
     category_names = " / ".join(EXCLUDE_CATEGORIES.keys())
     st.markdown("**内置过滤分类：**")
-    st.caption(f"{category_names}（可在 config.json 的 exclude_categories 中修改）")
+    st.caption(f"{category_names}")
 
     st.divider()
 
@@ -333,12 +347,21 @@ with tab1:
     kw_list = [kw.strip() for kw in re.split(r'[,\n]+', keywords_input) if kw.strip()]
     total_kw = len(kw_list)
 
+    col_save_kw, col_start = st.columns([1, 3])
+    with col_save_kw:
+        if st.button("💾 保存词根", key="save_keywords"):
+            APP_CONFIG["keywords"] = kw_list
+            save_config(APP_CONFIG)
+            st.success("已保存")
+            st.rerun()
+
     if total_kw > 0:
         effective_interval = request_interval
         est_time = total_kw * effective_interval / 60
         st.info(f"共 **{total_kw}** 个词根，预计用时约 **{est_time:.1f}** 分钟（间隔 {effective_interval:.0f} 秒）")
 
-    start = st.button("🔍 开始追踪", type="primary", use_container_width=True)
+    with col_start:
+        start = st.button("🔍 开始追踪", type="primary", use_container_width=True)
 
     if start and total_kw > 0:
         all_rising = []
@@ -741,10 +764,37 @@ with tab3:
             domain = urlparse(url).netloc
             cache_file = SITEMAP_DIR / f"{domain}.xml"
             status = "✅ 已有快照" if cache_file.exists() else "🆕 待首次采集"
-            st.markdown(f"**{i+1}.** `{url}`  {status}")
+            col_url, col_del = st.columns([5, 1])
+            with col_url:
+                st.markdown(f"**{i+1}.** `{url}`  {status}")
+            with col_del:
+                if st.button("🗑", key=f"del_sitemap_{i}", help="删除此站点"):
+                    config_sitemaps.pop(i)
+                    APP_CONFIG["sitemap_urls"] = config_sitemaps
+                    save_config(APP_CONFIG)
+                    st.rerun()
     else:
-        st.info("未配置监控站点。请在 config.json 的 `sitemap_urls` 中添加 Sitemap URL。")
-        st.code('{\n  "sitemap_urls": [\n    "https://example.com/sitemap.xml"\n  ]\n}', language="json")
+        st.info("暂无监控站点，请在下方添加。")
+
+    # 添加新 sitemap
+    col_input, col_add = st.columns([4, 1])
+    with col_input:
+        new_sitemap_url = st.text_input("添加 Sitemap URL", placeholder="https://example.com/sitemap.xml",
+                                         label_visibility="collapsed")
+    with col_add:
+        if st.button("➕ 添加", key="add_sitemap"):
+            if new_sitemap_url.strip():
+                url_to_add = new_sitemap_url.strip()
+                if url_to_add not in config_sitemaps:
+                    config_sitemaps.append(url_to_add)
+                    APP_CONFIG["sitemap_urls"] = config_sitemaps
+                    save_config(APP_CONFIG)
+                    st.success(f"已添加")
+                    st.rerun()
+                else:
+                    st.warning("该 URL 已存在")
+            else:
+                st.warning("请输入 URL")
 
     st.divider()
 
