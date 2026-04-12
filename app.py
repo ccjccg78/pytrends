@@ -6,11 +6,53 @@ import plotly.graph_objects as go
 import time
 import random
 import json
+import re
 import requests as http_requests
 from datetime import datetime
 from pathlib import Path
 from pytrends.request import TrendReq
 from pytrends.exceptions import TooManyRequestsError, ResponseError
+
+# ── 不适合做工具站/小游戏/资讯的过滤词库 ─────────────────────────
+EXCLUDE_CATEGORIES = {
+    "赌博": ["casino", "gambling", "gamble", "bet ", "betting", "slot machine", "poker", "roulette",
+            "blackjack", "lottery", "jackpot", "wager", "sportsbook"],
+    "人名/明星": ["wife", "husband", "boyfriend", "girlfriend", "married", "dating",
+                 "net worth", "birthday", "born", "died", "death", "funeral", "obituary",
+                 "son of", "daughter of", "who is", "how old"],
+    "体育": ["nba", "nfl", "nhl", "mlb", "fifa", "ufc", "boxing", "wrestling",
+            "playoff", "championship", "score", "highlights", "roster", "standings",
+            "draft pick", "super bowl", "world cup", "premier league", "la liga",
+            "serie a", "bundesliga", "vs ", " vs"],
+    "娱乐/影视": ["movie", "trailer", "episode", "season finale", "netflix", "hulu",
+                 "disney+", "box office", "premiere", "concert", "tour dates",
+                 "album release", "grammy", "oscar", "emmy"],
+    "新闻/时事": ["shooting", "earthquake", "hurricane", "tornado", "flood", "crash",
+                 "explosion", "protest", "riot", "scandal", "arrested", "convicted",
+                 "sentenced", "indicted", "breaking news", "election", "vote"],
+    "成人内容": ["porn", "xxx", "nude", "naked", "onlyfans", "nsfw", "adult video"],
+    "不相关": ["weather", "horoscope", "zodiac", "astrology", "recipe",
+             "lyrics", "chords", "tab ", "mugshot"],
+}
+
+def get_all_exclude_words(custom_excludes=""):
+    """合并所有过滤词"""
+    all_words = []
+    for words in EXCLUDE_CATEGORIES.values():
+        all_words.extend(words)
+    if custom_excludes.strip():
+        all_words.extend([w.strip().lower() for w in custom_excludes.split(",") if w.strip()])
+    return all_words
+
+def filter_results(df, query_col, custom_excludes=""):
+    """过滤不适合的结果"""
+    if df.empty:
+        return df
+    exclude_list = get_all_exclude_words(custom_excludes)
+    mask = ~df[query_col].str.lower().apply(
+        lambda q: any(ex in q for ex in exclude_list)
+    )
+    return df[mask].reset_index(drop=True)
 
 # ── 飞书通知 ──────────────────────────────────────────────────
 def load_notify_config():
@@ -21,26 +63,31 @@ def load_notify_config():
         return cfg.get("notify", {})
     return {}
 
-def send_feishu_notify(combined, spike_results=None):
+def send_feishu_notify(combined, spike_results=None, title="🔥 热点关键词趋势报告"):
     """查询完成后发送飞书通知，每个新词单独一条消息"""
     notify = load_notify_config()
     webhook = notify.get("feishu_webhook", "")
     if not webhook:
-        return
+        return False
 
     now = datetime.now().strftime("%Y-%m-%d %H:%M")
     total = len(combined)
-    sources = combined['keyword'].nunique()
+    sources = combined['keyword'].nunique() if 'keyword' in combined.columns else 0
 
     # 排序取 Top 15
     df = combined.copy()
-    df['_sort'] = pd.to_numeric(df['value'], errors='coerce')
-    max_v = df['_sort'].max()
-    df.loc[df['_sort'].isna(), '_sort'] = (max_v * 2) if pd.notna(max_v) else 999999
-    top = df.nlargest(15, '_sort')
+    if 'value' in df.columns:
+        df['_sort'] = pd.to_numeric(df['value'], errors='coerce')
+        max_v = df['_sort'].max()
+        df.loc[df['_sort'].isna(), '_sort'] = (max_v * 2) if pd.notna(max_v) else 999999
+        top = df.nlargest(15, '_sort')
+    else:
+        top = df.head(15)
 
-    # 先发一条汇总消息
-    summary_parts = [f"📅 {now}", f"共找到 {total} 个上升词，来自 {sources} 个词根"]
+    # 汇总消息
+    summary_parts = [f"📅 {now}", f"共找到 {total} 条结果"]
+    if sources > 0:
+        summary_parts[1] = f"共找到 {total} 个上升词，来自 {sources} 个词根"
     if spike_results:
         new_count = sum(1 for v in spike_results.values() if v.get('pattern') == '新词飙升')
         spike_count = sum(1 for v in spike_results.values() if v.get('pattern') == '近日飙升')
@@ -51,67 +98,62 @@ def send_feishu_notify(combined, spike_results=None):
 
     summary_payload = {
         "msg_type": "post",
-        "content": {
-            "post": {
-                "zh_cn": {
-                    "title": "🔥 热点关键词趋势报告",
-                    "content": [[{"tag": "text", "text": "\n".join(summary_parts)}]],
-                }
-            }
-        }
+        "content": {"post": {"zh_cn": {
+            "title": title,
+            "content": [[{"tag": "text", "text": "\n".join(summary_parts)}]],
+        }}}
     }
     try:
         http_requests.post(webhook, json=summary_payload, timeout=10)
     except Exception:
         pass
 
-    # 逐条发送 Top 词详情
+    # 逐条发送详情
     success = True
     for _, row in top.iterrows():
-        val = row['value']
-        growth = f'+{val}%' if str(val).isdigit() else '飙升'
-        trend_tag = ''
-        if '趋势' in row and row['趋势'] == '新词飙升':
-            trend_tag = '✨ 新词飙升'
-        elif '趋势' in row and row['趋势'] == '近日飙升':
-            trend_tag = '🔥 近日飙升'
-        elif '趋势' in row and row['趋势'] == '持续上升':
-            trend_tag = '📈 持续上升'
+        lines = ["⚠ 监测到新的关键词", ""]
 
-        lines = [
-            f"⚠ 监测到新的关键词",
-            f"",
-            f"主关键词: {row['keyword']}",
-            f"相关查询: {row['query']}",
-            f"增长率: {growth}",
-        ]
-        if trend_tag:
-            lines.append(f"趋势: {trend_tag}")
+        if 'keyword' in row:
+            lines.append(f"主关键词: {row['keyword']}")
+        if 'query' in row:
+            lines.append(f"相关查询: {row['query']}")
+        elif 'title' in row:
+            lines.append(f"话题: {row['title']}")
+
+        if 'value' in row:
+            val = row['value']
+            growth = f'+{val}%' if str(val).isdigit() else ('飙升' if val == 'Breakout' else str(val))
+            lines.append(f"增长率: {growth}")
+        if 'formattedTraffic' in row:
+            lines.append(f"搜索量: {row['formattedTraffic']}")
+
+        trend_tag = ''
+        if '趋势' in row and row['趋势']:
+            lines.append(f"趋势: {row['趋势']}")
 
         detail_payload = {
             "msg_type": "post",
-            "content": {
-                "post": {
-                    "zh_cn": {
-                        "title": f"📊 {row['query'][:30]}",
-                        "content": [[{"tag": "text", "text": "\n".join(lines)}]],
-                    }
-                }
-            }
+            "content": {"post": {"zh_cn": {
+                "title": f"📊 {str(row.get('query', row.get('title', '')))[:30]}",
+                "content": [[{"tag": "text", "text": "\n".join(lines)}]],
+            }}}
         }
         try:
             resp = http_requests.post(webhook, json=detail_payload, timeout=10)
             if resp.status_code != 200:
                 success = False
-            time.sleep(0.5)  # 避免发送太快
+            time.sleep(0.5)
         except Exception:
             success = False
 
     return success
 
+
+# ════════════════════════════════════════════════════════════════
+# 页面配置
+# ════════════════════════════════════════════════════════════════
 st.set_page_config(page_title="热点关键词趋势追踪", page_icon="🔥", layout="wide")
 
-# 隐藏右上角英文菜单
 st.markdown("""
 <style>
 #MainMenu {visibility: hidden;}
@@ -211,9 +253,12 @@ with st.sidebar:
 
     st.divider()
 
-    exclude_words = st.text_input("排除关键词（逗号分隔）",
-                                   value="casino, gambling, bet, slot, poker",
-                                   help="结果中包含这些词的会被自动过滤掉")
+    exclude_words = st.text_input("额外排除词（逗号分隔）",
+                                   value="",
+                                   help="除内置过滤（赌博/人名/体育/娱乐/新闻/成人）外，额外排除的词")
+
+    st.markdown("**内置过滤分类：**")
+    st.caption("赌博 / 人名明星 / 体育 / 娱乐影视 / 新闻时事 / 成人内容 / 不相关内容")
 
     st.divider()
 
@@ -231,202 +276,178 @@ with st.sidebar:
         "如遇持续报错，请适当减小每分钟请求数或等待片刻后重试。"
     )
 
-# ── 主区域 ────────────────────────────────────────────────────
-st.title("🔥 热点关键词趋势追踪")
-st.caption("输入一批关键词，自动查询每个词在 Google Trends 上近期增长最快的相关搜索词")
+# ════════════════════════════════════════════════════════════════
+# 主区域 - 标签页
+# ════════════════════════════════════════════════════════════════
+tab1, tab2 = st.tabs(["🔍 爆增词追踪", "🔥 时下流行"])
 
-# 默认示例关键词
-default_keywords = (
-    "Translate, Generator, Example, Convert, Online, Downloader, "
-    "Maker, Creator, Editor, Processor, Designer, Compiler, Analyzer, "
-    "Evaluator, Sender, Receiver, Interpreter, Uploader, Calculator, "
-    "Sample, Template, Format"
-)
+# ════════════════════════════════════════════════════════════════
+# Tab 1: 爆增词追踪
+# ════════════════════════════════════════════════════════════════
+with tab1:
+    st.title("🔍 热点关键词趋势追踪")
+    st.caption("输入一批关键词，自动查询每个词在 Google Trends 上近期增长最快的相关搜索词")
 
-keywords_input = st.text_area(
-    "输入关键词（用逗号分隔）",
-    value=default_keywords,
-    height=100,
-    label_visibility="collapsed",
-    placeholder="输入关键词，用逗号分隔，例如: Translate, Generator, Example ..."
-)
+    default_keywords = (
+        "Translate, Generator, Example, Convert, Online, Downloader, "
+        "Maker, Creator, Editor, Processor, Designer, Compiler, Analyzer, "
+        "Evaluator, Sender, Receiver, Interpreter, Uploader, Calculator, "
+        "Sample, Template, Format"
+    )
 
-# 解析关键词
-import re
-kw_list = [kw.strip() for kw in re.split(r'[,\n]+', keywords_input) if kw.strip()]
-total_kw = len(kw_list)
+    keywords_input = st.text_area(
+        "输入关键词（用逗号或换行分隔）",
+        value=default_keywords,
+        height=100,
+        label_visibility="collapsed",
+        placeholder="输入关键词，用逗号或换行分隔..."
+    )
 
-if total_kw > 0:
-    effective_interval = max(request_interval, 60.0 / max_rpm)
-    est_time = total_kw * effective_interval / 60
-    st.info(f"共 **{total_kw}** 个词根，预计用时约 **{est_time:.1f}** 分钟（间隔 {effective_interval:.0f} 秒）")
+    kw_list = [kw.strip() for kw in re.split(r'[,\n]+', keywords_input) if kw.strip()]
+    total_kw = len(kw_list)
 
-# 开始追踪按钮
-start = st.button("🔍 开始追踪", type="primary", use_container_width=True)
+    if total_kw > 0:
+        effective_interval = max(request_interval, 60.0 / max_rpm)
+        est_time = total_kw * effective_interval / 60
+        st.info(f"共 **{total_kw}** 个词根，预计用时约 **{est_time:.1f}** 分钟（间隔 {effective_interval:.0f} 秒）")
 
-# ── 执行逻辑 ──────────────────────────────────────────────────
-if start and total_kw > 0:
-    all_rising = []
-    failed_kw = []
-    effective_interval = max(request_interval, 60.0 / max_rpm)
+    start = st.button("🔍 开始追踪", type="primary", use_container_width=True)
 
-    progress_bar = st.progress(0, text="准备开始...")
-    status_area = st.empty()
+    if start and total_kw > 0:
+        all_rising = []
+        failed_kw = []
+        effective_interval = max(request_interval, 60.0 / max_rpm)
 
-    pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
+        progress_bar = st.progress(0, text="准备开始...")
+        status_area = st.empty()
 
-    for i, kw in enumerate(kw_list):
-        progress = (i) / total_kw
-        progress_bar.progress(progress, text=f"正在查询: **{kw}** ({i+1}/{total_kw})")
+        pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
 
-        retry_count = 0
-        max_retries = 3
-
-        while retry_count < max_retries:
-            try:
-                pytrend.build_payload(
-                    kw_list=[kw],
-                    cat=category[1],
-                    timeframe=timeframe[1],
-                    geo=geo[1],
-                )
-                result = pytrend.related_queries()
-                if kw in result and result[kw]['rising'] is not None:
-                    rising_df = result[kw]['rising'].copy()
-                    rising_df['keyword'] = kw
-                    all_rising.append(rising_df)
-
-                break  # 成功，跳出重试
-
-            except TooManyRequestsError:
-                retry_count += 1
-                wait = 60 + retry_count * 30 + random.randint(0, 10)
-                status_area.warning(f"⚠️ 触发限流 (429)，等待 {wait} 秒后重试... ({retry_count}/{max_retries})")
-                time.sleep(wait)
-                pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
-
-            except ResponseError as e:
-                retry_count += 1
-                wait = 30 + retry_count * 15
-                status_area.warning(f"⚠️ 请求出错: {e}，等待 {wait} 秒后重试... ({retry_count}/{max_retries})")
-                time.sleep(wait)
-
-            except Exception as e:
-                status_area.error(f"❌ 查询 '{kw}' 失败: {e}")
-                failed_kw.append(kw)
-                break
-
-        else:
-            failed_kw.append(kw)
-            status_area.error(f"❌ '{kw}' 重试 {max_retries} 次后仍失败，跳过")
-
-        if i < total_kw - 1:
-            jitter = random.uniform(0, 2)
-            time.sleep(effective_interval + jitter)
-
-    progress_bar.progress(1.0, text="查询完成！")
-    status_area.empty()
-
-    # ── 第二阶段：趋势验证（判断是否近日突然飙升）──────────────
-    spike_results = {}  # query -> {'pattern': '近日飙升'/'持续增长'/'稳定', 'trend': [...]}
-
-    if all_rising and spike_check and spike_top_n > 0:
-        temp_combined = pd.concat(all_rising, ignore_index=True)
-        temp_combined['value_num'] = pd.to_numeric(temp_combined['value'], errors='coerce')
-        # Breakout 排最前
-        max_v = temp_combined['value_num'].max()
-        temp_combined.loc[temp_combined['value_num'].isna(), 'value_num'] = (max_v * 2) if pd.notna(max_v) else 999999
-        top_queries = temp_combined.nlargest(spike_top_n, 'value_num')['query'].unique().tolist()
-
-        # 每 5 个一批查 interest_over_time（pytrends 限制最多 5 个关键词）
-        batches = [top_queries[i:i+5] for i in range(0, len(top_queries), 5)]
-        total_batches = len(batches)
-
-        progress_bar.progress(0, text="正在验证趋势曲线...")
-
-        for bi, batch in enumerate(batches):
-            progress_bar.progress((bi) / total_batches, text=f"验证趋势: {', '.join(batch[:3])}... ({bi+1}/{total_batches})")
+        for i, kw in enumerate(kw_list):
+            progress_bar.progress(i / total_kw, text=f"正在查询: **{kw}** ({i+1}/{total_kw})")
 
             retry_count = 0
-            while retry_count < 3:
+            max_retries = 3
+
+            while retry_count < max_retries:
                 try:
                     pytrend.build_payload(
-                        kw_list=batch,
-                        cat=category[1],
-                        timeframe='now 7-d',
-                        geo=geo[1],
+                        kw_list=[kw], cat=category[1],
+                        timeframe=timeframe[1], geo=geo[1],
                     )
-                    iot = pytrend.interest_over_time()
-
-                    if not iot.empty:
-                        for q in batch:
-                            if q in iot.columns:
-                                series = iot[q].values.astype(float)
-                                if len(series) < 4:
-                                    continue
-                                # 分成前半段和后 1/3 段比较
-                                split = max(1, len(series) * 2 // 3)
-                                early = series[:split]
-                                late = series[split:]
-                                early_avg = np.mean(early) if len(early) > 0 else 0
-                                late_avg = np.mean(late) if len(late) > 0 else 0
-                                peak_pos = np.argmax(series)
-                                peak_in_late = peak_pos >= split
-
-                                # 判断模式
-                                is_new = early_avg < 1  # 前期几乎没搜索量 = 新词
-
-                                if is_new:
-                                    pattern = '新词飙升'
-                                elif late_avg > early_avg * 2 and peak_in_late:
-                                    pattern = '近日飙升'
-                                elif late_avg > early_avg * 1.3:
-                                    pattern = '持续上升'
-                                else:
-                                    pattern = '平稳'
-
-                                spike_results[q] = {
-                                    'pattern': pattern,
-                                    'is_new': is_new,
-                                    'trend': series.tolist(),
-                                }
+                    result = pytrend.related_queries()
+                    if kw in result and result[kw]['rising'] is not None:
+                        rising_df = result[kw]['rising'].copy()
+                        rising_df['keyword'] = kw
+                        all_rising.append(rising_df)
                     break
 
                 except TooManyRequestsError:
                     retry_count += 1
-                    wait = 60 + retry_count * 30
-                    status_area.warning(f"⚠️ 趋势验证触发限流，等待 {wait} 秒...")
+                    wait = 60 + retry_count * 30 + random.randint(0, 10)
+                    status_area.warning(f"⚠️ 触发限流 (429)，等待 {wait} 秒后重试... ({retry_count}/{max_retries})")
                     time.sleep(wait)
                     pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
-                except Exception:
-                    break
 
-            if bi < total_batches - 1:
+                except ResponseError as e:
+                    retry_count += 1
+                    wait = 30 + retry_count * 15
+                    status_area.warning(f"⚠️ 请求出错: {e}，等待 {wait} 秒后重试... ({retry_count}/{max_retries})")
+                    time.sleep(wait)
+
+                except Exception as e:
+                    status_area.error(f"❌ 查询 '{kw}' 失败: {e}")
+                    failed_kw.append(kw)
+                    break
+            else:
+                failed_kw.append(kw)
+                status_area.error(f"❌ '{kw}' 重试 {max_retries} 次后仍失败，跳过")
+
+            if i < total_kw - 1:
                 time.sleep(effective_interval + random.uniform(0, 2))
 
-        progress_bar.progress(1.0, text="验证完成！")
+        progress_bar.progress(1.0, text="查询完成！")
+        status_area.empty()
 
-    # ── 结果展示 ──────────────────────────────────────────────
-    if all_rising:
+        # 趋势验证
+        spike_results = {}
+        if all_rising and spike_check and spike_top_n > 0:
+            temp_combined = pd.concat(all_rising, ignore_index=True)
+            temp_combined['value_num'] = pd.to_numeric(temp_combined['value'], errors='coerce')
+            max_v = temp_combined['value_num'].max()
+            temp_combined.loc[temp_combined['value_num'].isna(), 'value_num'] = (max_v * 2) if pd.notna(max_v) else 999999
+            top_queries = temp_combined.nlargest(spike_top_n, 'value_num')['query'].unique().tolist()
+
+            batches = [top_queries[i:i+5] for i in range(0, len(top_queries), 5)]
+            total_batches = len(batches)
+            progress_bar.progress(0, text="正在验证趋势曲线...")
+
+            for bi, batch in enumerate(batches):
+                progress_bar.progress(bi / total_batches, text=f"验证趋势: {', '.join(batch[:3])}... ({bi+1}/{total_batches})")
+
+                retry_count = 0
+                while retry_count < 3:
+                    try:
+                        pytrend.build_payload(kw_list=batch, cat=category[1], timeframe='now 7-d', geo=geo[1])
+                        iot = pytrend.interest_over_time()
+
+                        if not iot.empty:
+                            for q in batch:
+                                if q in iot.columns:
+                                    series = iot[q].values.astype(float)
+                                    if len(series) < 4:
+                                        continue
+                                    split = max(1, len(series) * 2 // 3)
+                                    early = series[:split]
+                                    late = series[split:]
+                                    early_avg = np.mean(early) if len(early) > 0 else 0
+                                    late_avg = np.mean(late) if len(late) > 0 else 0
+                                    peak_pos = np.argmax(series)
+                                    peak_in_late = peak_pos >= split
+                                    is_new = early_avg < 1
+
+                                    if is_new:
+                                        pattern = '新词飙升'
+                                    elif late_avg > early_avg * 2 and peak_in_late:
+                                        pattern = '近日飙升'
+                                    elif late_avg > early_avg * 1.3:
+                                        pattern = '持续上升'
+                                    else:
+                                        pattern = '平稳'
+
+                                    spike_results[q] = {
+                                        'pattern': pattern, 'is_new': is_new,
+                                        'trend': series.tolist(),
+                                    }
+                        break
+                    except TooManyRequestsError:
+                        retry_count += 1
+                        wait = 60 + retry_count * 30
+                        status_area.warning(f"⚠️ 趋势验证触发限流，等待 {wait} 秒...")
+                        time.sleep(wait)
+                        pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
+                    except Exception:
+                        break
+
+                if bi < total_batches - 1:
+                    time.sleep(effective_interval + random.uniform(0, 2))
+
+            progress_bar.progress(1.0, text="验证完成！")
+
+        # 结果展示
+        if all_rising:
             combined = pd.concat(all_rising, ignore_index=True)
 
-            # 过滤排除词
-            if exclude_words.strip():
-                exclude_list = [w.strip().lower() for w in exclude_words.split(",") if w.strip()]
-                combined = combined[~combined['query'].str.lower().apply(
-                    lambda q: any(ex in q for ex in exclude_list)
-                )].reset_index(drop=True)
+            # 智能过滤
+            combined = filter_results(combined, 'query', exclude_words)
 
             combined['value_num'] = pd.to_numeric(combined['value'], errors='coerce')
-            has_numeric = combined['value_num'].notna()
-            breakout_df = combined[~has_numeric].copy()
-
             total_rising = len(combined)
             total_sources = combined['keyword'].nunique()
 
             st.divider()
             st.subheader("🚀 相关爆增词汇总（近期增长最多）")
-            st.markdown(f"**共找到 {total_rising} 个上升词，来自 {total_sources} 个词根**")
+            st.markdown(f"**共找到 {total_rising} 个上升词，来自 {total_sources} 个词根**（已过滤不相关内容）")
 
             if spike_results:
                 combined['趋势'] = combined['query'].map(
@@ -444,8 +465,8 @@ if start and total_kw > 0:
             else:
                 combined['趋势'] = ''
 
-            # 发送飞书通知
-            if send_feishu_notify(combined, spike_results):
+            # 飞书通知
+            if send_feishu_notify(combined, spike_results, "🔍 爆增词追踪报告"):
                 st.success("✅ 飞书通知已发送")
             else:
                 st.warning("⚠️ 飞书通知发送失败，请检查 config.json 中的 webhook 配置")
@@ -470,13 +491,9 @@ if start and total_kw > 0:
                 top_n['label'] = top_n.apply(make_label, axis=1)
 
                 fig = px.bar(
-                    top_n.iloc[::-1],
-                    x='value_num',
-                    y='label',
-                    orientation='h',
+                    top_n.iloc[::-1], x='value_num', y='label', orientation='h',
                     labels={'value_num': '增长幅度 (%)', 'label': '', 'keyword': '词根'},
-                    color='keyword',
-                    color_discrete_sequence=px.colors.qualitative.Pastel,
+                    color='keyword', color_discrete_sequence=px.colors.qualitative.Pastel,
                 )
                 fig.update_layout(
                     height=max(450, len(top_n) * 32),
@@ -501,13 +518,7 @@ if start and total_kw > 0:
                 st.dataframe(display_df, use_container_width=True, hide_index=True, height=600)
 
                 csv = display_df.to_csv(index=False).encode('utf-8-sig')
-                st.download_button(
-                    label="📥 下载 CSV",
-                    data=csv,
-                    file_name="trending_keywords.csv",
-                    mime="text/csv",
-                    use_container_width=True,
-                )
+                st.download_button("📥 下载 CSV", csv, "trending_keywords.csv", "text/csv", use_container_width=True)
 
             # 近日飙升词趋势曲线
             if spike_results:
@@ -518,7 +529,7 @@ if start and total_kw > 0:
                 if hot_queries:
                     st.divider()
                     st.subheader("🔥 近日突然飙升的词 — 趋势曲线")
-                    st.caption("✨ 新词飙升 = 之前几乎无搜索量，近日突然出现的全新热词 &nbsp;&nbsp; 🔥 近日飙升 = 已有搜索量，近日突然大幅上升")
+                    st.caption("✨ 新词飙升 = 之前几乎无搜索量  🔥 近日飙升 = 已有搜索量，近日突然大幅上升")
 
                     cols_per_row = 3
                     for row_start in range(0, len(hot_queries), cols_per_row):
@@ -537,24 +548,88 @@ if start and total_kw > 0:
                                 fig_mini.add_trace(go.Scatter(
                                     y=trend, mode='lines+markers',
                                     line=dict(color=line_color, width=2),
-                                    marker=dict(size=3),
-                                    hoverinfo='y',
+                                    marker=dict(size=3), hoverinfo='y',
                                 ))
                                 fig_mini.update_layout(
                                     title=dict(text=f'{tag} {q[:25]}', font=dict(size=13)),
-                                    height=180,
-                                    margin=dict(l=10, r=10, t=35, b=10),
+                                    height=180, margin=dict(l=10, r=10, t=35, b=10),
                                     xaxis=dict(showticklabels=False, showgrid=False),
                                     yaxis=dict(showticklabels=False, showgrid=True, gridcolor='#f0f0f0'),
                                     plot_bgcolor='white',
                                 )
                                 st.plotly_chart(fig_mini, use_container_width=True)
+        else:
+            st.warning("未查询到任何上升趋势词。可能是关键词太冷门，或遭遇限流。请调大请求间隔后重试。")
 
-    else:
-        st.warning("未查询到任何上升趋势词。可能是关键词太冷门，或遭遇限流。请调大请求间隔后重试。")
+        if failed_kw:
+            st.warning(f"以下 {len(failed_kw)} 个词查询失败: {', '.join(failed_kw)}")
 
-    if failed_kw:
-        st.warning(f"以下 {len(failed_kw)} 个词查询失败: {', '.join(failed_kw)}")
+    elif start and total_kw == 0:
+        st.error("请输入至少一个关键词")
 
-elif start and total_kw == 0:
-    st.error("请输入至少一个关键词")
+
+# ════════════════════════════════════════════════════════════════
+# Tab 2: 时下流行
+# ════════════════════════════════════════════════════════════════
+with tab2:
+    st.title("🔥 时下流行趋势")
+    st.caption("获取 Google Trends 实时热门搜索话题，自动过滤不适合做工具站/小游戏的内容")
+
+    trending_geo = st.selectbox("采集地区", [
+        ("美国", "united_states"),
+        ("英国", "united_kingdom"),
+        ("日本", "japan"),
+        ("德国", "germany"),
+        ("法国", "france"),
+        ("加拿大", "canada"),
+        ("澳大利亚", "australia"),
+        ("印度", "india"),
+        ("巴西", "brazil"),
+        ("韩国", "south_korea"),
+        ("新加坡", "singapore"),
+        ("中国台湾", "taiwan"),
+        ("中国香港", "hong_kong"),
+    ], format_func=lambda x: x[0], index=0, key="trending_geo")
+
+    start_trending = st.button("🔥 获取时下流行", type="primary", use_container_width=True)
+
+    if start_trending:
+        with st.spinner("正在获取时下流行数据..."):
+            try:
+                pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
+                trending_df = pytrend.trending_searches(pn=trending_geo[1])
+
+                if trending_df is not None and not trending_df.empty:
+                    trending_df.columns = ['title']
+
+                    # 过滤
+                    original_count = len(trending_df)
+                    trending_df = filter_results(trending_df, 'title', exclude_words)
+                    filtered_count = original_count - len(trending_df)
+
+                    st.divider()
+                    st.subheader(f"📊 {trending_geo[0]} 时下流行话题")
+                    st.markdown(f"**共 {len(trending_df)} 个话题**（已过滤 {filtered_count} 个不相关内容）")
+
+                    # 飞书通知
+                    if not trending_df.empty:
+                        notify_df = trending_df.copy()
+                        notify_df['keyword'] = trending_geo[0]
+                        notify_df['query'] = notify_df['title']
+                        if send_feishu_notify(notify_df, title=f"🔥 {trending_geo[0]}时下流行"):
+                            st.success("✅ 飞书通知已发送")
+
+                    # 展示
+                    for i, row in trending_df.iterrows():
+                        st.markdown(f"**{i+1}.** {row['title']}")
+
+                    # 下载
+                    csv = trending_df.to_csv(index=False).encode('utf-8-sig')
+                    st.download_button("📥 下载 CSV", csv, "trending_now.csv", "text/csv", use_container_width=True)
+
+                else:
+                    st.warning("未获取到时下流行数据，请稍后重试。")
+
+            except Exception as e:
+                st.error(f"获取失败: {e}")
+                st.info("提示：时下流行功能需要服务器能访问 Google Trends。如遇网络问题，请检查服务器网络。")
