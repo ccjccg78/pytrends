@@ -786,17 +786,29 @@ with tab3:
     st.subheader("📋 监控列表")
 
     if config_sitemaps:
+        # 初始化选中状态（默认全选）
+        if "sitemap_checked" not in st.session_state:
+            st.session_state.sitemap_checked = [True] * len(config_sitemaps)
+        # 同步长度
+        while len(st.session_state.sitemap_checked) < len(config_sitemaps):
+            st.session_state.sitemap_checked.append(True)
+        st.session_state.sitemap_checked = st.session_state.sitemap_checked[:len(config_sitemaps)]
+
         for i, url in enumerate(config_sitemaps):
             domain = urlparse(url).netloc
-            # 兼容旧 .xml 和新 .json 缓存
             has_cache = (SITEMAP_DIR / f"{domain}.json").exists() or (SITEMAP_DIR / f"{domain}.xml").exists()
             status = "✅ 已有快照" if has_cache else "🆕 待首次采集"
-            col_url, col_del = st.columns([5, 1])
+            col_chk, col_url, col_del = st.columns([0.5, 5, 0.8])
+            with col_chk:
+                st.session_state.sitemap_checked[i] = st.checkbox(
+                    "选中", value=st.session_state.sitemap_checked[i],
+                    key=f"chk_sitemap_{i}", label_visibility="collapsed")
             with col_url:
                 st.markdown(f"**{i+1}.** `{url}`  {status}")
             with col_del:
                 if st.button("🗑", key=f"del_sitemap_{i}", help="删除此站点"):
                     config_sitemaps.pop(i)
+                    st.session_state.sitemap_checked.pop(i)
                     APP_CONFIG["sitemap_urls"] = config_sitemaps
                     save_config(APP_CONFIG)
                     st.rerun()
@@ -831,17 +843,26 @@ with tab3:
 
     st.divider()
 
-    start_sitemap = st.button("🔍 立即检查", type="primary", use_container_width=True,
-                               disabled=len(config_sitemaps) == 0)
+    # 筛选出勾选的站点
+    checked_sitemaps = []
+    if config_sitemaps:
+        for i, url in enumerate(config_sitemaps):
+            if st.session_state.get("sitemap_checked", [True] * len(config_sitemaps))[i]:
+                checked_sitemaps.append(url)
 
-    if start_sitemap and config_sitemaps:
+    checked_count = len(checked_sitemaps)
+    btn_label = f"🔍 立即检查（{checked_count}/{len(config_sitemaps)}）" if config_sitemaps else "🔍 立即检查"
+    start_sitemap = st.button(btn_label, type="primary", use_container_width=True,
+                               disabled=checked_count == 0)
+
+    if start_sitemap and checked_sitemaps:
         SITEMAP_DIR.mkdir(parents=True, exist_ok=True)
         all_changes = {}
 
         progress_bar = st.progress(0, text="开始检查...")
-        total = len(config_sitemaps)
+        total = len(checked_sitemaps)
 
-        for i, url in enumerate(config_sitemaps):
+        for i, url in enumerate(checked_sitemaps):
             domain = urlparse(url).netloc
             progress_bar.progress(i / total, text=f"检查 {domain}...")
 
