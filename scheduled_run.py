@@ -338,9 +338,18 @@ def fetch_rising_queries(config):
                 time.sleep(wait)
 
             except Exception as e:
-                print(f"  ❌ 失败: {e}")
-                failed.append(kw)
-                break
+                if '429' in str(e):
+                    retry_count += 1
+                    wait = 60 + retry_count * 60 + random.randint(0, 10)
+                    old_interval = effective_interval
+                    effective_interval = min(effective_interval * 1.5, 300)
+                    print(f"  ⚠️ 429 限流，等待 {wait}s 后重试 ({retry_count}/3)，后续间隔 {old_interval:.0f}s → {effective_interval:.0f}s")
+                    time.sleep(wait)
+                    pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
+                else:
+                    print(f"  ❌ 失败: {e}")
+                    failed.append(kw)
+                    break
         else:
             failed.append(kw)
             print(f"  ❌ 重试耗尽，跳过")

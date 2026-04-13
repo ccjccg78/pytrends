@@ -414,9 +414,18 @@ with tab1:
                     time.sleep(wait)
 
                 except Exception as e:
-                    status_area.error(f"❌ 查询 '{kw}' 失败: {e}")
-                    failed_kw.append(kw)
-                    break
+                    if '429' in str(e):
+                        retry_count += 1
+                        wait = 60 + retry_count * 60 + random.randint(0, 10)
+                        old_interval = effective_interval
+                        effective_interval = min(effective_interval * 1.5, 300)
+                        status_area.warning(f"⚠️ 触发限流 (429)，等待 {wait} 秒后重试... ({retry_count}/{max_retries})，后续间隔 {old_interval:.0f}s → {effective_interval:.0f}s")
+                        time.sleep(wait)
+                        pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
+                    else:
+                        status_area.error(f"❌ 查询 '{kw}' 失败: {e}")
+                        failed_kw.append(kw)
+                        break
             else:
                 failed_kw.append(kw)
                 status_area.error(f"❌ '{kw}' 重试 {max_retries} 次后仍失败，跳过")
@@ -485,8 +494,16 @@ with tab1:
                         status_area.warning(f"⚠️ 趋势验证触发限流，等待 {wait} 秒...后续间隔 → {effective_interval:.0f}s")
                         time.sleep(wait)
                         pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
-                    except Exception:
-                        break
+                    except Exception as e:
+                        if '429' in str(e):
+                            retry_count += 1
+                            wait = 60 + retry_count * 60 + random.randint(0, 10)
+                            effective_interval = min(effective_interval * 1.5, 300)
+                            status_area.warning(f"⚠️ 趋势验证触发限流，等待 {wait} 秒...后续间隔 → {effective_interval:.0f}s")
+                            time.sleep(wait)
+                            pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
+                        else:
+                            break
 
                 if bi < total_batches - 1:
                     time.sleep(effective_interval + random.uniform(0, 2))
