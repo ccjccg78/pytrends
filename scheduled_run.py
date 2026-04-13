@@ -294,6 +294,7 @@ def fetch_rising_queries(config):
 
     all_rising = []
     failed = []
+    effective_interval = interval
 
     pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
 
@@ -317,15 +318,23 @@ def fetch_rising_queries(config):
 
             except TooManyRequestsError:
                 retry_count += 1
-                wait = 60 + retry_count * 30 + random.randint(0, 10)
-                print(f"  ⚠️ 429 限流，等待 {wait}s 后重试 ({retry_count}/3)")
+                wait = 60 + retry_count * 60 + random.randint(0, 10)
+                old_interval = effective_interval
+                effective_interval = min(effective_interval * 1.5, 300)
+                print(f"  ⚠️ 429 限流，等待 {wait}s 后重试 ({retry_count}/3)，后续间隔 {old_interval:.0f}s → {effective_interval:.0f}s")
                 time.sleep(wait)
                 pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
 
             except ResponseError as e:
                 retry_count += 1
-                wait = 30 + retry_count * 15
-                print(f"  ⚠️ 错误: {e}，等待 {wait}s ({retry_count}/3)")
+                if '429' in str(e):
+                    wait = 60 + retry_count * 60 + random.randint(0, 10)
+                    old_interval = effective_interval
+                    effective_interval = min(effective_interval * 1.5, 300)
+                    print(f"  ⚠️ 429 限流，等待 {wait}s 后重试 ({retry_count}/3)，后续间隔 {old_interval:.0f}s → {effective_interval:.0f}s")
+                else:
+                    wait = 30 + retry_count * 15
+                    print(f"  ⚠️ 错误: {e}，等待 {wait}s ({retry_count}/3)")
                 time.sleep(wait)
 
             except Exception as e:
@@ -337,7 +346,7 @@ def fetch_rising_queries(config):
             print(f"  ❌ 重试耗尽，跳过")
 
         if i < len(kw_list) - 1:
-            time.sleep(interval + random.uniform(0, 2))
+            time.sleep(effective_interval + random.uniform(0, 2))
 
     return all_rising, failed
 

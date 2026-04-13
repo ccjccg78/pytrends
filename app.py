@@ -277,8 +277,8 @@ with st.sidebar:
         ("过去 12 个月", "today 12-m"),
     ], format_func=lambda x: x[0], index=0)
 
-    request_interval = st.slider("请求间隔（秒）", min_value=2, max_value=300, value=45,
-                                  help="每次请求之间的基础等待时间，优先级最高")
+    request_interval = st.slider("请求间隔（秒）", min_value=2, max_value=300, value=60,
+                                  help="每次请求之间的基础等待时间，触发429后自动加大")
 
     st.divider()
 
@@ -394,15 +394,23 @@ with tab1:
 
                 except TooManyRequestsError:
                     retry_count += 1
-                    wait = 60 + retry_count * 30 + random.randint(0, 10)
-                    status_area.warning(f"⚠️ 触发限流 (429)，等待 {wait} 秒后重试... ({retry_count}/{max_retries})")
+                    wait = 60 + retry_count * 60 + random.randint(0, 10)
+                    old_interval = effective_interval
+                    effective_interval = min(effective_interval * 1.5, 300)
+                    status_area.warning(f"⚠️ 触发限流 (429)，等待 {wait} 秒后重试... ({retry_count}/{max_retries})，后续间隔 {old_interval:.0f}s → {effective_interval:.0f}s")
                     time.sleep(wait)
                     pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
 
                 except ResponseError as e:
                     retry_count += 1
                     wait = 30 + retry_count * 15
-                    status_area.warning(f"⚠️ 请求出错: {e}，等待 {wait} 秒后重试... ({retry_count}/{max_retries})")
+                    if '429' in str(e):
+                        old_interval = effective_interval
+                        effective_interval = min(effective_interval * 1.5, 300)
+                        wait = 60 + retry_count * 60 + random.randint(0, 10)
+                        status_area.warning(f"⚠️ 触发限流 (429)，等待 {wait} 秒后重试... ({retry_count}/{max_retries})，后续间隔 {old_interval:.0f}s → {effective_interval:.0f}s")
+                    else:
+                        status_area.warning(f"⚠️ 请求出错: {e}，等待 {wait} 秒后重试... ({retry_count}/{max_retries})")
                     time.sleep(wait)
 
                 except Exception as e:
@@ -472,8 +480,9 @@ with tab1:
                         break
                     except TooManyRequestsError:
                         retry_count += 1
-                        wait = 60 + retry_count * 30
-                        status_area.warning(f"⚠️ 趋势验证触发限流，等待 {wait} 秒...")
+                        wait = 60 + retry_count * 60 + random.randint(0, 10)
+                        effective_interval = min(effective_interval * 1.5, 300)
+                        status_area.warning(f"⚠️ 趋势验证触发限流，等待 {wait} 秒...后续间隔 → {effective_interval:.0f}s")
                         time.sleep(wait)
                         pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
                     except Exception:
