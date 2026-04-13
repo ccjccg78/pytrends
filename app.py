@@ -431,7 +431,14 @@ with tab1:
                 status_area.error(f"❌ '{kw}' 重试 {max_retries} 次后仍失败，跳过")
 
             if i < total_kw - 1:
-                time.sleep(effective_interval + random.uniform(0, 2))
+                # 每10个词休息5分钟，避免触发限流
+                if (i + 1) % 10 == 0:
+                    rest_min = 5
+                    status_area.info(f"⏸ 已完成 {i+1}/{total_kw}，休息 {rest_min} 分钟避免限流...")
+                    time.sleep(rest_min * 60)
+                    status_area.empty()
+                else:
+                    time.sleep(effective_interval + random.uniform(0, 2))
 
         progress_bar.progress(1.0, text="查询完成！")
         status_area.empty()
