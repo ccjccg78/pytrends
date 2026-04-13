@@ -794,6 +794,17 @@ with tab3:
             st.session_state.sitemap_checked.append(True)
         st.session_state.sitemap_checked = st.session_state.sitemap_checked[:len(config_sitemaps)]
 
+        # 全选 / 全不选
+        col_all, col_none, _ = st.columns([1, 1, 4])
+        with col_all:
+            if st.button("☑ 全选", key="select_all_sitemap"):
+                st.session_state.sitemap_checked = [True] * len(config_sitemaps)
+                st.rerun()
+        with col_none:
+            if st.button("☐ 全不选", key="deselect_all_sitemap"):
+                st.session_state.sitemap_checked = [False] * len(config_sitemaps)
+                st.rerun()
+
         for i, url in enumerate(config_sitemaps):
             domain = urlparse(url).netloc
             has_cache = (SITEMAP_DIR / f"{domain}.json").exists() or (SITEMAP_DIR / f"{domain}.xml").exists()
