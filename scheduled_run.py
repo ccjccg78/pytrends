@@ -870,7 +870,7 @@ def fetch_twitter(config):
         if not success and retry_count >= 3:
             print(f"    ❌ 重试耗尽，跳过")
 
-        time.sleep(5)  # 账号之间间隔 5 秒
+        time.sleep(120)  # 账号之间间隔 120 秒
 
     return all_new_tweets
 

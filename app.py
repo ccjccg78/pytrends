@@ -1215,7 +1215,8 @@ with tab4:
                 st.warning(f"⚠️ @{username} 重试 {max_retries} 次仍失败，跳过")
 
             if idx < total - 1:
-                time.sleep(5)  # 账号之间间隔 5 秒
+                status_area.info(f"⏸ 等待 120 秒后采集下一个账号...")
+                time.sleep(120)  # 账号之间间隔 120 秒
 
         status_area.empty()
 
