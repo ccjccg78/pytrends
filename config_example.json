@@ -42,7 +42,7 @@
     "geo": "",
     "category": 0,
     "timeframe": "now 7-d",
-    "request_interval": 8,
+    "request_interval": 50,
     "spike_top_n": 20,
 
     "exclude_words": [],
