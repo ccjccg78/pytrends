@@ -318,7 +318,7 @@ with st.sidebar:
 # ════════════════════════════════════════════════════════════════
 # 主区域 - 标签页
 # ════════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4 = st.tabs(["🔍 爆增词追踪", "🔥 时下流行", "🗺 Sitemap 监控", "🐦 Twitter 监控"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔍 爆增词追踪", "🔥 时下流行", "🗺 Sitemap 监控", "🐦 Twitter 监控", "🤖 AI 平台监控"])
 
 # ════════════════════════════════════════════════════════════════
 # Tab 1: 爆增词追踪
@@ -1281,3 +1281,345 @@ with tab4:
 
         if not has_new:
             st.success("✅ 所有账号无新推文")
+
+
+# ════════════════════════════════════════════════════════════════
+# Tab 5: AI 平台监控
+# ════════════════════════════════════════════════════════════════
+with tab5:
+    st.title("🤖 AI 平台监控")
+    st.caption("监控 Hugging Face / arXiv / Product Hunt / GitHub Trending / Hacker News 上的 AI 新动态")
+
+    AI_MONITOR_CACHE_DIR = Path(__file__).parent / "output" / "ai_monitor"
+
+    AI_PLATFORM_INFO = {
+        "huggingface": {"name": "Hugging Face", "icon": "\U0001F917", "desc": "热门模型/Spaces"},
+        "arxiv": {"name": "arXiv", "icon": "\U0001F4C4", "desc": "AI 新论文"},
+        "producthunt": {"name": "Product Hunt", "icon": "\U0001F680", "desc": "新上线 AI 工具"},
+        "github": {"name": "GitHub Trending", "icon": "\U0001F4BB", "desc": "热门 AI 开源项目"},
+        "hackernews": {"name": "Hacker News", "icon": "\U0001F4F0", "desc": "AI 相关热帖"},
+    }
+
+    ai_config = APP_CONFIG.get("ai_monitor", {})
+    enabled_platforms = ai_config.get("enabled_platforms",
+                                       ["huggingface", "arxiv", "producthunt", "github", "hackernews"])
+
+    # ── 平台选择 ──
+    st.subheader("📋 监控平台")
+    selected_platforms = []
+    cols = st.columns(5)
+    for i, (key, info) in enumerate(AI_PLATFORM_INFO.items()):
+        with cols[i]:
+            checked = st.checkbox(f"{info['icon']} {info['name']}",
+                                   value=key in enabled_platforms,
+                                   key=f"ai_plat_{key}")
+            if checked:
+                selected_platforms.append(key)
+            st.caption(info["desc"])
+
+    if st.button("💾 保存平台设置", key="save_ai_platforms"):
+        if "ai_monitor" not in APP_CONFIG:
+            APP_CONFIG["ai_monitor"] = {}
+        APP_CONFIG["ai_monitor"]["enabled_platforms"] = selected_platforms
+        save_config(APP_CONFIG)
+        st.success("已保存")
+        st.rerun()
+
+    # ── 过滤关键词 ──
+    st.divider()
+    ai_filter_kw = ai_config.get("filter_keywords", [])
+    ai_kw_str = ", ".join(ai_filter_kw)
+    ai_kw_input = st.text_input("过滤关键词（逗号分隔，用于 GitHub/HN/ProductHunt 过滤非 AI 内容）",
+                                 value=ai_kw_str,
+                                 help="只保留包含这些关键词的条目；HuggingFace 和 arXiv 默认全部 AI 内容无需过滤",
+                                 key="ai_filter_kw")
+    if st.button("💾 保存过滤词", key="save_ai_filter"):
+        new_kw = [w.strip() for w in ai_kw_input.split(",") if w.strip()]
+        if "ai_monitor" not in APP_CONFIG:
+            APP_CONFIG["ai_monitor"] = {}
+        APP_CONFIG["ai_monitor"]["filter_keywords"] = new_kw
+        save_config(APP_CONFIG)
+        st.success("已保存")
+        st.rerun()
+
+    st.divider()
+
+    # ── 采集按钮 ──
+    start_ai = st.button("🤖 立即采集", type="primary", use_container_width=True,
+                           disabled=not selected_platforms)
+
+    if start_ai:
+        import xml.etree.ElementTree as ET
+
+        AI_MONITOR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        filter_kw = [w.strip() for w in ai_kw_input.split(",") if w.strip()] if ai_kw_input.strip() else ai_filter_kw
+
+        def _ai_filter_ui(text, keywords):
+            if not keywords:
+                return True
+            text_lower = text.lower()
+            return any(kw.lower() in text_lower for kw in keywords)
+
+        def _load_cache(platform):
+            cache_file = AI_MONITOR_CACHE_DIR / f"{platform}.json"
+            if cache_file.exists():
+                return set(json.loads(cache_file.read_text(encoding="utf-8")))
+            return set()
+
+        def _save_cache(platform, seen_ids):
+            cache_file = AI_MONITOR_CACHE_DIR / f"{platform}.json"
+            trimmed = sorted(seen_ids)[-500:]
+            cache_file.write_text(json.dumps(trimmed, ensure_ascii=False), encoding="utf-8")
+
+        progress = st.progress(0, text="开始采集...")
+        total = len(selected_platforms)
+        all_results = {}  # {platform: [items]}
+
+        for idx, platform in enumerate(selected_platforms):
+            info = AI_PLATFORM_INFO[platform]
+            progress.progress(idx / total, text=f"采集 {info['icon']} {info['name']}...")
+
+            try:
+                if platform == "huggingface":
+                    resp = http_requests.get("https://huggingface.co/api/trending",
+                                             timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+                    resp.raise_for_status()
+                    data = resp.json()
+                    items_raw = data if isinstance(data, list) else data.get("recentlyTrending", data.get("models", []))
+                    seen = _load_cache("huggingface")
+                    items = []
+                    limit = ai_config.get("huggingface_limit", 30)
+                    for item in items_raw[:limit]:
+                        repo_id = item.get("repoData", {}).get("id", "") or item.get("id", "")
+                        if not repo_id or repo_id in seen:
+                            continue
+                        likes = item.get("repoData", {}).get("likes", 0) or item.get("likes", 0)
+                        repo_type = item.get("repoType", "model")
+                        items.append({"id": repo_id, "title": repo_id, "likes": likes, "type": repo_type})
+                        seen.add(repo_id)
+                    _save_cache("huggingface", seen)
+                    if items:
+                        all_results["huggingface"] = items
+                    st.caption(f"✅ Hugging Face — {len(items)} 个新项目")
+
+                elif platform == "arxiv":
+                    categories = ai_config.get("arxiv_categories", ["cs.AI", "cs.CL", "cs.LG"])
+                    seen = _load_cache("arxiv")
+                    items = []
+                    ns = {'dc': 'http://purl.org/dc/elements/1.1/'}
+                    for cat in categories:
+                        try:
+                            resp = http_requests.get(f"http://export.arxiv.org/rss/{cat}",
+                                                     timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+                            resp.raise_for_status()
+                            root = ET.fromstring(resp.content)
+                            for item in root.iter('item'):
+                                title_el = item.find('title')
+                                link_el = item.find('link')
+                                title = title_el.text.strip() if title_el is not None and title_el.text else ""
+                                link = link_el.text.strip() if link_el is not None and link_el.text else ""
+                                title = " ".join(title.split())
+                                if title.startswith("(") or not title:
+                                    continue
+                                paper_id = link or title
+                                if paper_id in seen:
+                                    continue
+                                items.append({"id": paper_id, "title": title, "category": cat, "url": link})
+                                seen.add(paper_id)
+                        except Exception as e:
+                            st.caption(f"  ⚠️ {cat}: {e}")
+                        if cat != categories[-1]:
+                            time.sleep(3)
+                    _save_cache("arxiv", seen)
+                    if items:
+                        all_results["arxiv"] = items
+                    st.caption(f"✅ arXiv — {len(items)} 篇新论文")
+
+                elif platform == "producthunt":
+                    resp = http_requests.get("https://www.producthunt.com/feed",
+                                             timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+                    resp.raise_for_status()
+                    root = ET.fromstring(resp.content)
+                    seen = _load_cache("producthunt")
+                    items = []
+                    for item in root.iter('item'):
+                        title_el = item.find('title')
+                        link_el = item.find('link')
+                        desc_el = item.find('description')
+                        title = title_el.text.strip() if title_el is not None and title_el.text else ""
+                        link = link_el.text.strip() if link_el is not None and link_el.text else ""
+                        desc = desc_el.text.strip() if desc_el is not None and desc_el.text else ""
+                        if not title or link in seen:
+                            continue
+                        if not _ai_filter_ui(f"{title} {desc}", filter_kw):
+                            continue
+                        items.append({"id": link, "title": title, "url": link, "tagline": desc[:120]})
+                        seen.add(link)
+                    _save_cache("producthunt", seen)
+                    if items:
+                        all_results["producthunt"] = items
+                    st.caption(f"✅ Product Hunt — {len(items)} 个新产品")
+
+                elif platform == "github":
+                    from lxml import html as lxml_html
+                    seen = _load_cache("github")
+                    items = []
+                    languages = ai_config.get("github_languages", [])
+                    urls = [("", "https://github.com/trending?since=daily")]
+                    for lang in languages[:4]:
+                        urls.append((lang, f"https://github.com/trending/{lang.lower()}?since=daily"))
+                    collected = set()
+                    for lang_label, url in urls:
+                        try:
+                            resp = http_requests.get(url, timeout=15, headers={
+                                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'})
+                            if resp.status_code != 200:
+                                continue
+                            tree = lxml_html.fromstring(resp.text)
+                            articles = tree.cssselect('article.Box-row')
+                            for art in articles:
+                                h2 = art.cssselect('h2 a')
+                                if not h2:
+                                    continue
+                                repo_path = h2[0].get('href', '').strip('/')
+                                if not repo_path or repo_path in collected or repo_path in seen:
+                                    continue
+                                collected.add(repo_path)
+                                desc_el = art.cssselect('p')
+                                desc = desc_el[0].text_content().strip() if desc_el else ""
+                                lang_el = art.cssselect('[itemprop="programmingLanguage"]')
+                                language = lang_el[0].text_content().strip() if lang_el else ""
+                                star_els = art.cssselect('span.d-inline-block.float-sm-right')
+                                today_stars = star_els[0].text_content().strip() if star_els else ""
+                                if not _ai_filter_ui(f"{repo_path} {desc}", filter_kw):
+                                    continue
+                                items.append({"id": repo_path, "repo": repo_path, "description": desc[:150],
+                                              "language": language or lang_label, "today_stars": today_stars})
+                                seen.add(repo_path)
+                        except Exception as e:
+                            st.caption(f"  ⚠️ GitHub {lang_label or '总榜'}: {e}")
+                        time.sleep(2)
+                    _save_cache("github", seen)
+                    if items:
+                        all_results["github"] = items
+                    st.caption(f"✅ GitHub Trending — {len(items)} 个新项目")
+
+                elif platform == "hackernews":
+                    hn_limit = ai_config.get("hackernews_limit", 50)
+                    resp = http_requests.get("https://hacker-news.firebaseio.com/v0/topstories.json", timeout=15)
+                    resp.raise_for_status()
+                    story_ids = resp.json()[:hn_limit]
+                    seen = _load_cache("hackernews")
+                    items = []
+                    for i, sid in enumerate(story_ids):
+                        sid_str = str(sid)
+                        if sid_str in seen:
+                            continue
+                        try:
+                            item_resp = http_requests.get(
+                                f"https://hacker-news.firebaseio.com/v0/item/{sid}.json", timeout=10)
+                            item_resp.raise_for_status()
+                            hn_item = item_resp.json()
+                            if not hn_item:
+                                continue
+                            title = hn_item.get("title", "")
+                            url = hn_item.get("url", "")
+                            score = hn_item.get("score", 0)
+                            descendants = hn_item.get("descendants", 0)
+                            if not _ai_filter_ui(f"{title} {url}", filter_kw):
+                                seen.add(sid_str)
+                                continue
+                            items.append({"id": sid_str, "title": title,
+                                          "url": url or f"https://news.ycombinator.com/item?id={sid}",
+                                          "score": score, "comments": descendants})
+                            seen.add(sid_str)
+                        except Exception:
+                            continue
+                        if (i + 1) % 10 == 0:
+                            time.sleep(1)
+                    _save_cache("hackernews", seen)
+                    if items:
+                        all_results["hackernews"] = items
+                    st.caption(f"✅ Hacker News — {len(items)} 条新帖")
+
+            except Exception as e:
+                st.warning(f"⚠️ {info['name']} 失败: {e}")
+
+            if idx < total - 1:
+                time.sleep(2)
+
+        progress.progress(1.0, text="采集完成！")
+        st.divider()
+
+        # 结果展示
+        if all_results:
+            total_items = sum(len(v) for v in all_results.values())
+            st.subheader(f"🆕 发现 {total_items} 条新内容")
+
+            # 飞书通知
+            notify = load_notify_config()
+            webhook = notify.get("feishu_webhook", "")
+            if webhook:
+                now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+                content_lines = [
+                    [{"tag": "text", "text": f"📅 {now}\n{len(all_results)} 个平台有新动态，共 {total_items} 条"}],
+                ]
+                for plat, items in all_results.items():
+                    pinfo = AI_PLATFORM_INFO[plat]
+                    content_lines.append([{"tag": "text", "text": f"\n{pinfo['icon']} {pinfo['name']}（{len(items)} 条）:"}])
+                    for item in items[:15]:
+                        if plat == "huggingface":
+                            line = f"  {item['title']}  ({item['type']}, {item['likes']} likes)"
+                        elif plat == "arxiv":
+                            line = f"  {item['title'][:80]}  [{item['category']}]"
+                        elif plat == "producthunt":
+                            line = f"  {item['title']}  {item.get('tagline', '')[:60]}"
+                        elif plat == "github":
+                            line = f"  {item['repo']}  {item.get('today_stars', '')}  [{item.get('language', '')}]"
+                        elif plat == "hackernews":
+                            line = f"  {item['title'][:80]}  ({item['score']} pts)"
+                        else:
+                            line = f"  {item.get('title', '')}"
+                        content_lines.append([{"tag": "text", "text": line}])
+                    if len(items) > 15:
+                        content_lines.append([{"tag": "text", "text": f"  ...等共 {len(items)} 条"}])
+
+                payload = {
+                    "msg_type": "post",
+                    "content": {"post": {"zh_cn": {
+                        "title": "🤖 AI 平台监控报告",
+                        "content": content_lines,
+                    }}}
+                }
+                try:
+                    feishu_resp = http_requests.post(webhook, json=payload, timeout=10)
+                    if feishu_resp.status_code == 200:
+                        st.success("✅ 飞书通知已发送")
+                    else:
+                        st.warning(f"⚠️ 飞书通知失败: {feishu_resp.status_code}")
+                except Exception:
+                    st.warning("⚠️ 飞书通知发送异常")
+
+            # 按平台展示
+            for plat, items in all_results.items():
+                pinfo = AI_PLATFORM_INFO[plat]
+                with st.expander(f"{pinfo['icon']} {pinfo['name']}（{len(items)} 条新内容）", expanded=True):
+                    for item in items:
+                        if plat == "huggingface":
+                            st.markdown(f"- **{item['title']}** — {item['type']}, {item['likes']} likes "
+                                        f"[查看](https://huggingface.co/{item['id']})")
+                        elif plat == "arxiv":
+                            st.markdown(f"- **{item['title'][:100]}** [{item['category']}] "
+                                        f"[论文]({item.get('url', '')})")
+                        elif plat == "producthunt":
+                            st.markdown(f"- **{item['title']}** — {item.get('tagline', '')} "
+                                        f"[查看]({item['url']})")
+                        elif plat == "github":
+                            st.markdown(f"- **{item['repo']}** [{item.get('language', '')}] "
+                                        f"{item.get('today_stars', '')} — {item.get('description', '')[:80]} "
+                                        f"[GitHub](https://github.com/{item['repo']})")
+                        elif plat == "hackernews":
+                            st.markdown(f"- **{item['title'][:80]}** ({item['score']} pts, "
+                                        f"{item.get('comments', 0)} comments) [链接]({item['url']})")
+        else:
+            st.success("✅ 所有平台无新内容")

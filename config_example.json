@@ -72,6 +72,15 @@
         "https://example.com/sitemap.xml"
     ],
 
+    "ai_monitor": {
+        "enabled_platforms": ["huggingface", "arxiv", "producthunt", "github", "hackernews"],
+        "filter_keywords": ["AI", "LLM", "GPT", "machine learning", "deep learning", "neural", "transformer", "agent", "chatbot", "open-source"],
+        "huggingface_limit": 30,
+        "arxiv_categories": ["cs.AI", "cs.CL", "cs.LG"],
+        "hackernews_limit": 50,
+        "github_languages": ["Python", "TypeScript", "Rust", "Go"]
+    },
+
     "twitter": {
         "rapidapi_key": "",
         "accounts": ["rohanpaul_ai", "arrakis_ai", "testingcatalog"],

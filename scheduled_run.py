@@ -10,12 +10,14 @@
      0 22,9 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode sitemap
      0 0 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode rising
      0 */4 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode twitter
+     0 8,20 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode ai_monitor
 
 支持模式:
-  --mode trending  采集所有地区时下流行 (默认)
-  --mode rising    采集关键词爆增词
-  --mode sitemap   监控竞品 Sitemap 变化
-  --mode twitter   监控 Twitter 账号动态
+  --mode trending    采集所有地区时下流行 (默认)
+  --mode rising      采集关键词爆增词
+  --mode sitemap     监控竞品 Sitemap 变化
+  --mode twitter     监控 Twitter 账号动态
+  --mode ai_monitor  监控 AI 平台动态 (HuggingFace/arXiv/ProductHunt/GitHub/HackerNews)
 """
 
 import json
@@ -705,6 +707,417 @@ def send_sitemap_feishu(webhook_url, all_changes):
         print(f"❌ 飞书通知异常: {e}")
 
 
+# ── AI 平台监控 ─────────────────────────────────────────────────
+AI_MONITOR_CACHE_DIR = Path(__file__).parent / "output" / "ai_monitor"
+
+# 平台名称映射
+AI_PLATFORM_NAMES = {
+    "huggingface": "Hugging Face",
+    "arxiv": "arXiv",
+    "producthunt": "Product Hunt",
+    "github": "GitHub Trending",
+    "hackernews": "Hacker News",
+}
+AI_PLATFORM_ICONS = {
+    "huggingface": "\U0001F917",
+    "arxiv": "\U0001F4C4",
+    "producthunt": "\U0001F680",
+    "github": "\U0001F4BB",
+    "hackernews": "\U0001F4F0",
+}
+
+
+def _load_ai_cache(platform):
+    """加载平台缓存的已见 ID 集合"""
+    cache_file = AI_MONITOR_CACHE_DIR / f"{platform}.json"
+    if cache_file.exists():
+        return set(json.loads(cache_file.read_text(encoding="utf-8")))
+    return set()
+
+
+def _save_ai_cache(platform, seen_ids):
+    """保存已见 ID，保留最近 500 条"""
+    AI_MONITOR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_file = AI_MONITOR_CACHE_DIR / f"{platform}.json"
+    trimmed = sorted(seen_ids)[-500:]
+    cache_file.write_text(json.dumps(trimmed, ensure_ascii=False), encoding="utf-8")
+
+
+def _ai_filter(text, keywords):
+    """关键词过滤：text 中包含任一 keyword 则返回 True"""
+    if not keywords:
+        return True
+    text_lower = text.lower()
+    return any(kw.lower() in text_lower for kw in keywords)
+
+
+def _fetch_huggingface(ai_config):
+    """采集 Hugging Face 热门模型/Spaces"""
+    limit = ai_config.get("huggingface_limit", 30)
+    print(f"  📡 Hugging Face（热门模型）...")
+    try:
+        resp = http_requests.get("https://huggingface.co/api/trending",
+                                 timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+        resp.raise_for_status()
+        data = resp.json()
+
+        # API 返回 recentlyTrending 列表
+        items_raw = data if isinstance(data, list) else data.get("recentlyTrending", data.get("models", []))
+        seen = _load_ai_cache("huggingface")
+        new_items = []
+
+        for item in items_raw[:limit]:
+            repo_id = item.get("repoData", {}).get("id", "") or item.get("id", "")
+            if not repo_id or repo_id in seen:
+                continue
+            author = item.get("repoData", {}).get("author", "") or repo_id.split("/")[0] if "/" in repo_id else ""
+            likes = item.get("repoData", {}).get("likes", 0) or item.get("likes", 0)
+            repo_type = item.get("repoType", "model")
+            new_items.append({
+                "id": repo_id,
+                "title": repo_id,
+                "author": author,
+                "likes": likes,
+                "type": repo_type,
+            })
+            seen.add(repo_id)
+
+        _save_ai_cache("huggingface", seen)
+        print(f"    -> {len(new_items)} 个新项目")
+        return new_items
+    except Exception as e:
+        print(f"    -> 失败: {e}")
+        return []
+
+
+def _fetch_arxiv(ai_config):
+    """采集 arXiv AI 相关论文"""
+    categories = ai_config.get("arxiv_categories", ["cs.AI", "cs.CL", "cs.LG"])
+    print(f"  📡 arXiv（{', '.join(categories)}）...")
+    seen = _load_ai_cache("arxiv")
+    new_items = []
+
+    for cat in categories:
+        try:
+            rss_url = f"http://export.arxiv.org/rss/{cat}"
+            resp = http_requests.get(rss_url, timeout=15,
+                                     headers={'User-Agent': 'Mozilla/5.0'})
+            resp.raise_for_status()
+            root = ET.fromstring(resp.content)
+
+            # RSS 2.0 格式
+            ns = {'rdf': 'http://www.w3.org/1999/02/22-rdf-syntax-ns#',
+                  'dc': 'http://purl.org/dc/elements/1.1/'}
+            for item in root.iter('item'):
+                title_el = item.find('title')
+                link_el = item.find('link')
+                creator_el = item.find('dc:creator', ns)
+
+                title = title_el.text.strip() if title_el is not None and title_el.text else ""
+                link = link_el.text.strip() if link_el is not None and link_el.text else ""
+                authors = creator_el.text.strip() if creator_el is not None and creator_el.text else ""
+
+                # 清理标题中的换行和多余空格
+                title = " ".join(title.split())
+                # 去掉 arXiv 标题末尾的 (arXiv:xxxx.xxxxx vN [cs.XX])
+                if title.startswith("(") or not title:
+                    continue
+
+                paper_id = link if link else title
+                if paper_id in seen:
+                    continue
+
+                new_items.append({
+                    "id": paper_id,
+                    "title": title,
+                    "authors": authors[:80],  # 截断过长作者列表
+                    "category": cat,
+                    "url": link,
+                })
+                seen.add(paper_id)
+
+        except Exception as e:
+            print(f"    -> {cat} 失败: {e}")
+
+        if cat != categories[-1]:
+            time.sleep(3)  # arXiv 要求间隔 3 秒
+
+    _save_ai_cache("arxiv", seen)
+    print(f"    -> {len(new_items)} 篇新论文")
+    return new_items
+
+
+def _fetch_producthunt(ai_config):
+    """采集 Product Hunt 最新产品（RSS）"""
+    filter_kw = ai_config.get("filter_keywords", [])
+    print(f"  📡 Product Hunt...")
+    try:
+        resp = http_requests.get("https://www.producthunt.com/feed",
+                                 timeout=15, headers={'User-Agent': 'Mozilla/5.0'})
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+
+        seen = _load_ai_cache("producthunt")
+        new_items = []
+
+        for item in root.iter('item'):
+            title_el = item.find('title')
+            link_el = item.find('link')
+            desc_el = item.find('description')
+
+            title = title_el.text.strip() if title_el is not None and title_el.text else ""
+            link = link_el.text.strip() if link_el is not None and link_el.text else ""
+            desc = desc_el.text.strip() if desc_el is not None and desc_el.text else ""
+
+            if not title or link in seen:
+                continue
+
+            # 关键词过滤：标题或描述中包含 AI 相关词
+            if not _ai_filter(f"{title} {desc}", filter_kw):
+                continue
+
+            new_items.append({
+                "id": link,
+                "title": title,
+                "url": link,
+                "tagline": desc[:120] if desc else "",
+            })
+            seen.add(link)
+
+        _save_ai_cache("producthunt", seen)
+        print(f"    -> {len(new_items)} 个新产品")
+        return new_items
+    except Exception as e:
+        print(f"    -> 失败: {e}")
+        return []
+
+
+def _fetch_github_trending(ai_config):
+    """采集 GitHub Trending 项目"""
+    languages = ai_config.get("github_languages", [])
+    filter_kw = ai_config.get("filter_keywords", [])
+    print(f"  📡 GitHub Trending...")
+    try:
+        from lxml import html as lxml_html
+
+        seen = _load_ai_cache("github")
+        new_items = []
+
+        # 采集总榜，如果配了语言再逐语言采集
+        urls = [("", "https://github.com/trending?since=daily")]
+        for lang in languages[:4]:
+            urls.append((lang, f"https://github.com/trending/{lang.lower()}?since=daily"))
+
+        collected_repos = set()
+        for lang_label, url in urls:
+            try:
+                resp = http_requests.get(url, timeout=15, headers={
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                })
+                if resp.status_code != 200:
+                    continue
+                tree = lxml_html.fromstring(resp.text)
+                articles = tree.cssselect('article.Box-row')
+
+                for art in articles:
+                    # 仓库名
+                    h2 = art.cssselect('h2 a')
+                    if not h2:
+                        continue
+                    repo_path = h2[0].get('href', '').strip('/')
+                    if not repo_path or repo_path in collected_repos:
+                        continue
+                    collected_repos.add(repo_path)
+
+                    # 描述
+                    desc_el = art.cssselect('p')
+                    desc = desc_el[0].text_content().strip() if desc_el else ""
+
+                    # 语言
+                    lang_el = art.cssselect('[itemprop="programmingLanguage"]')
+                    language = lang_el[0].text_content().strip() if lang_el else ""
+
+                    # 今日星标
+                    star_els = art.cssselect('span.d-inline-block.float-sm-right')
+                    today_stars = ""
+                    if star_els:
+                        today_stars = star_els[0].text_content().strip()
+
+                    if repo_path in seen:
+                        continue
+
+                    # 关键词过滤
+                    if not _ai_filter(f"{repo_path} {desc}", filter_kw):
+                        continue
+
+                    new_items.append({
+                        "id": repo_path,
+                        "repo": repo_path,
+                        "description": desc[:150],
+                        "language": language or lang_label,
+                        "today_stars": today_stars,
+                    })
+                    seen.add(repo_path)
+
+            except Exception as e:
+                print(f"    -> {lang_label or '总榜'} 失败: {e}")
+
+            time.sleep(2)
+
+        _save_ai_cache("github", seen)
+        print(f"    -> {len(new_items)} 个新项目")
+        return new_items
+    except ImportError:
+        print(f"    -> 需要 lxml 库: pip install lxml")
+        return []
+    except Exception as e:
+        print(f"    -> 失败: {e}")
+        return []
+
+
+def _fetch_hackernews(ai_config):
+    """采集 Hacker News AI 相关热帖"""
+    limit = ai_config.get("hackernews_limit", 50)
+    filter_kw = ai_config.get("filter_keywords", [])
+    print(f"  📡 Hacker News（Top {limit}）...")
+    try:
+        resp = http_requests.get("https://hacker-news.firebaseio.com/v0/topstories.json",
+                                 timeout=15)
+        resp.raise_for_status()
+        story_ids = resp.json()[:limit]
+
+        seen = _load_ai_cache("hackernews")
+        new_items = []
+
+        for i, sid in enumerate(story_ids):
+            sid_str = str(sid)
+            if sid_str in seen:
+                continue
+            try:
+                item_resp = http_requests.get(
+                    f"https://hacker-news.firebaseio.com/v0/item/{sid}.json",
+                    timeout=10)
+                item_resp.raise_for_status()
+                item = item_resp.json()
+                if not item:
+                    continue
+
+                title = item.get("title", "")
+                url = item.get("url", "")
+                score = item.get("score", 0)
+                descendants = item.get("descendants", 0)
+
+                # 关键词过滤
+                if not _ai_filter(f"{title} {url}", filter_kw):
+                    seen.add(sid_str)  # 标记已看过，避免反复请求
+                    continue
+
+                new_items.append({
+                    "id": sid_str,
+                    "title": title,
+                    "url": url or f"https://news.ycombinator.com/item?id={sid}",
+                    "score": score,
+                    "comments": descendants,
+                })
+                seen.add(sid_str)
+
+            except Exception:
+                continue
+
+            # 每 10 个请求休息 1 秒
+            if (i + 1) % 10 == 0:
+                time.sleep(1)
+
+        _save_ai_cache("hackernews", seen)
+        print(f"    -> {len(new_items)} 条新帖")
+        return new_items
+    except Exception as e:
+        print(f"    -> 失败: {e}")
+        return []
+
+
+# 平台采集函数映射
+_AI_FETCHERS = {
+    "huggingface": _fetch_huggingface,
+    "arxiv": _fetch_arxiv,
+    "producthunt": _fetch_producthunt,
+    "github": _fetch_github_trending,
+    "hackernews": _fetch_hackernews,
+}
+
+
+def fetch_ai_monitor(config):
+    """采集所有启用的 AI 平台，返回 {platform: [items]}"""
+    ai_config = config.get("ai_monitor", {})
+    enabled = ai_config.get("enabled_platforms",
+                            ["huggingface", "arxiv", "producthunt", "github", "hackernews"])
+    AI_MONITOR_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    all_results = {}
+
+    for platform in enabled:
+        fetcher = _AI_FETCHERS.get(platform)
+        if not fetcher:
+            print(f"  ⚠️ 未知平台: {platform}")
+            continue
+        items = fetcher(ai_config)
+        if items:
+            all_results[platform] = items
+        time.sleep(2)  # 平台之间间隔
+
+    return all_results
+
+
+def send_ai_monitor_feishu(webhook_url, all_results):
+    """推送 AI 平台监控结果到飞书"""
+    now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+    total = sum(len(v) for v in all_results.values())
+    platform_count = len(all_results)
+
+    content_lines = [
+        [{"tag": "text", "text": f"📅 {now}\n{platform_count} 个平台有新动态，共 {total} 条"}],
+    ]
+
+    for platform, items in all_results.items():
+        icon = AI_PLATFORM_ICONS.get(platform, "")
+        name = AI_PLATFORM_NAMES.get(platform, platform)
+        content_lines.append([{"tag": "text", "text": f"\n{icon} {name}（{len(items)} 条新内容）:"}])
+
+        for item in items[:15]:
+            if platform == "huggingface":
+                line = f"  {item['title']}  ({item['type']}, {item['likes']} likes)"
+            elif platform == "arxiv":
+                line = f"  {item['title'][:80]}  [{item['category']}]"
+            elif platform == "producthunt":
+                line = f"  {item['title']}  {item.get('tagline', '')[:60]}"
+            elif platform == "github":
+                line = f"  {item['repo']}  {item.get('today_stars', '')}  [{item.get('language', '')}]"
+            elif platform == "hackernews":
+                line = f"  {item['title'][:80]}  ({item['score']} pts, {item['comments']} comments)"
+            else:
+                line = f"  {item.get('title', '')}"
+            content_lines.append([{"tag": "text", "text": line}])
+
+        if len(items) > 15:
+            content_lines.append([{"tag": "text", "text": f"  ...等共 {len(items)} 条"}])
+
+    payload = {
+        "msg_type": "post",
+        "content": {"post": {"zh_cn": {
+            "title": "🤖 AI 平台监控报告",
+            "content": content_lines,
+        }}}
+    }
+
+    try:
+        resp = http_requests.post(webhook_url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            print("✅ 飞书 AI 平台通知发送成功")
+        else:
+            print(f"❌ 飞书通知失败: {resp.status_code} {resp.text}")
+    except Exception as e:
+        print(f"❌ 飞书通知异常: {e}")
+
+
 # ── Twitter 监控 ────────────────────────────────────────────────
 TWITTER_API_HOST = "twitter241.p.rapidapi.com"
 TWITTER_CACHE_DIR = Path(__file__).parent / "output" / "twitter"
@@ -932,8 +1345,8 @@ def save_trending_csv(all_results):
 # ── 主流程 ────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=['trending', 'rising', 'sitemap', 'twitter'], default='trending',
-                        help='trending=时下流行, rising=爆增词追踪, sitemap=Sitemap监控, twitter=Twitter监控')
+    parser.add_argument('--mode', choices=['trending', 'rising', 'sitemap', 'twitter', 'ai_monitor'], default='trending',
+                        help='trending=时下流行, rising=爆增词追踪, sitemap=Sitemap监控, twitter=Twitter监控, ai_monitor=AI平台监控')
     args = parser.parse_args()
 
     now_bj = datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
@@ -1006,6 +1419,21 @@ def main():
             print(f"\n✅ 完成! {len(all_new_tweets)} 个账号有新动态，共 {total} 条推文")
         else:
             print("✅ 所有账号无新推文")
+
+    elif args.mode == 'ai_monitor':
+        # AI 平台监控
+        enabled = config.get("ai_monitor", {}).get("enabled_platforms", [])
+        print(f"\n🤖 开始监控 {len(enabled)} 个 AI 平台...")
+        all_results = fetch_ai_monitor(config)
+
+        if all_results:
+            total = sum(len(v) for v in all_results.values())
+            if webhook:
+                print("\n📮 发送飞书通知...")
+                send_ai_monitor_feishu(webhook, all_results)
+            print(f"\n✅ 完成! {len(all_results)} 个平台有新内容，共 {total} 条")
+        else:
+            print("✅ 所有平台无新内容")
 
 
 if __name__ == "__main__":
