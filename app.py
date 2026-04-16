@@ -1002,11 +1002,26 @@ with tab4:
     tw_max_tweets = tw_config.get("max_tweets_per_account", 20)
     tw_filter_kw = tw_config.get("filter_keywords", [])
 
+    # ── API Key 配置 ──
+    st.subheader("🔑 API 配置")
+    tw_key_input = st.text_input("RapidAPI Key", value=tw_api_key, type="password",
+                                  placeholder="填入你的 X-RapidAPI-Key",
+                                  key="tw_api_key_input")
+    if st.button("💾 保存 Key", key="save_tw_key"):
+        if "twitter" not in APP_CONFIG:
+            APP_CONFIG["twitter"] = {}
+        APP_CONFIG["twitter"]["rapidapi_key"] = tw_key_input.strip()
+        save_config(APP_CONFIG)
+        st.success("已保存")
+        st.rerun()
+
+    if not tw_key_input.strip():
+        st.warning("⚠️ 未配置 RapidAPI Key，请在上方填入后点击保存")
+
+    st.divider()
+
     # ── 配置区 ──
     st.subheader("📋 监控账号")
-
-    if not tw_api_key:
-        st.warning("⚠️ 未配置 RapidAPI Key，请在 config.json 的 twitter.rapidapi_key 中填入你的 Key")
 
     # 账号列表
     if tw_accounts:
@@ -1067,8 +1082,11 @@ with tab4:
     st.divider()
 
     # ── 采集按钮 ──
+    # 使用页面输入的 key（可能刚填还没保存，也能直接用）
+    effective_tw_key = tw_key_input.strip() if tw_key_input.strip() else tw_api_key
+
     start_twitter = st.button("🐦 立即采集", type="primary", use_container_width=True,
-                               disabled=not tw_api_key or not tw_accounts)
+                               disabled=not effective_tw_key or not tw_accounts)
 
     if start_twitter:
         def _tw_headers(api_key):
@@ -1089,7 +1107,7 @@ with tab4:
                 user_resp = http_requests.get(
                     f"https://{TWITTER_API_HOST}/user",
                     params={"username": username},
-                    headers=_tw_headers(tw_api_key), timeout=15)
+                    headers=_tw_headers(effective_tw_key), timeout=15)
                 user_resp.raise_for_status()
                 user_data = user_resp.json()
                 result = user_data.get("result", user_data)
@@ -1108,7 +1126,7 @@ with tab4:
                 tweets_resp = http_requests.get(
                     f"https://{TWITTER_API_HOST}/user-tweets",
                     params={"user": user_id, "count": str(tw_max_tweets)},
-                    headers=_tw_headers(tw_api_key), timeout=15)
+                    headers=_tw_headers(effective_tw_key), timeout=15)
                 tweets_resp.raise_for_status()
                 raw = tweets_resp.json()
 
