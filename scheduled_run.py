@@ -304,7 +304,7 @@ def fetch_rising_queries(config):
     geo = config.get("geo", "")
     cat = config.get("category", 0)
     timeframe = config.get("timeframe", "now 7-d")
-    interval = config.get("request_interval", 8)
+    interval = config.get("request_interval", 50)
 
     all_rising = []
     failed = []
@@ -400,7 +400,7 @@ def analyze_spikes(all_rising, config):
 
     geo = config.get("geo", "")
     cat = config.get("category", 0)
-    interval = config.get("request_interval", 8)
+    interval = config.get("request_interval", 50)
     spike_results = {}
 
     pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
