@@ -1099,98 +1099,125 @@ with tab4:
         total = len(tw_accounts)
         all_account_tweets = {}  # {username: [tweet, ...]}
 
+        status_area = st.empty()
+
         for idx, username in enumerate(tw_accounts):
             progress.progress(idx / total, text=f"采集 @{username}...")
 
-            try:
-                # 获取 user_id
-                user_resp = http_requests.get(
-                    f"https://{TWITTER_API_HOST}/user",
-                    params={"username": username},
-                    headers=_tw_headers(effective_tw_key), timeout=15)
-                user_resp.raise_for_status()
-                user_data = user_resp.json()
-                result = user_data.get("result", user_data)
-                if "data" in result:
-                    result = result["data"]
-                if "user" in result:
-                    result = result["user"]
-                if "result" in result:
-                    result = result["result"]
-                user_id = result.get("rest_id", "")
-                if not user_id:
-                    st.warning(f"⚠️ @{username} 未找到用户")
-                    continue
+            retry_count = 0
+            max_retries = 3
+            success = False
 
-                # 获取推文
-                tweets_resp = http_requests.get(
-                    f"https://{TWITTER_API_HOST}/user-tweets",
-                    params={"user": user_id, "count": str(tw_max_tweets)},
-                    headers=_tw_headers(effective_tw_key), timeout=15)
-                tweets_resp.raise_for_status()
-                raw = tweets_resp.json()
-
-                # 解析推文
-                tweets = []
-                instructions = (raw.get("result", raw)
-                                .get("timeline", {})
-                                .get("timeline", {})
-                                .get("instructions", []))
-                for inst in instructions:
-                    for entry in inst.get("entries", []):
-                        try:
-                            tweet_results = (entry.get("content", {})
-                                             .get("itemContent", {})
-                                             .get("tweet_results", {})
-                                             .get("result", {}))
-                            if not tweet_results:
-                                continue
-                            legacy = tweet_results.get("legacy", {})
-                            note = (tweet_results.get("note_tweet", {})
-                                    .get("note_tweet_results", {})
-                                    .get("result", {})
-                                    .get("text", ""))
-                            text = note if note else legacy.get("full_text", "")
-                            created_at = legacy.get("created_at", "")
-                            tweet_id = legacy.get("id_str", entry.get("entryId", ""))
-                            if text:
-                                tweets.append({
-                                    "text": text,
-                                    "created_at": created_at,
-                                    "tweet_id": tweet_id,
-                                })
-                        except (KeyError, TypeError, AttributeError):
-                            continue
-
-                # 加载已推送缓存
-                cache_file = TWITTER_CACHE_DIR / f"{username}.json"
-                seen = set()
-                if cache_file.exists():
-                    seen = set(json.loads(cache_file.read_text(encoding="utf-8")))
-
-                new_tweets = []
-                for tw in tweets:
-                    if tw["tweet_id"] in seen:
+            while retry_count < max_retries and not success:
+                try:
+                    # 获取 user_id
+                    user_resp = http_requests.get(
+                        f"https://{TWITTER_API_HOST}/user",
+                        params={"username": username},
+                        headers=_tw_headers(effective_tw_key), timeout=15)
+                    if user_resp.status_code == 429:
+                        raise Exception("429 Too Many Requests (user lookup)")
+                    user_resp.raise_for_status()
+                    user_data = user_resp.json()
+                    result = user_data.get("result", user_data)
+                    if "data" in result:
+                        result = result["data"]
+                    if "user" in result:
+                        result = result["user"]
+                    if "result" in result:
+                        result = result["result"]
+                    user_id = result.get("rest_id", "")
+                    if not user_id:
+                        st.warning(f"⚠️ @{username} 未找到用户")
+                        success = True  # 不重试，跳过
                         continue
-                    if filter_kw_lower:
-                        text_lower = tw["text"].lower()
-                        if not any(kw in text_lower for kw in filter_kw_lower):
+
+                    time.sleep(3)  # user 和 tweets 之间间隔
+
+                    # 获取推文
+                    tweets_resp = http_requests.get(
+                        f"https://{TWITTER_API_HOST}/user-tweets",
+                        params={"user": user_id, "count": str(tw_max_tweets)},
+                        headers=_tw_headers(effective_tw_key), timeout=15)
+                    if tweets_resp.status_code == 429:
+                        raise Exception("429 Too Many Requests (user-tweets)")
+                    tweets_resp.raise_for_status()
+                    raw = tweets_resp.json()
+
+                    # 解析推文
+                    tweets = []
+                    instructions = (raw.get("result", raw)
+                                    .get("timeline", {})
+                                    .get("timeline", {})
+                                    .get("instructions", []))
+                    for inst in instructions:
+                        for entry in inst.get("entries", []):
+                            try:
+                                tweet_results = (entry.get("content", {})
+                                                 .get("itemContent", {})
+                                                 .get("tweet_results", {})
+                                                 .get("result", {}))
+                                if not tweet_results:
+                                    continue
+                                legacy = tweet_results.get("legacy", {})
+                                note = (tweet_results.get("note_tweet", {})
+                                        .get("note_tweet_results", {})
+                                        .get("result", {})
+                                        .get("text", ""))
+                                text = note if note else legacy.get("full_text", "")
+                                created_at = legacy.get("created_at", "")
+                                tweet_id = legacy.get("id_str", entry.get("entryId", ""))
+                                if text:
+                                    tweets.append({
+                                        "text": text,
+                                        "created_at": created_at,
+                                        "tweet_id": tweet_id,
+                                    })
+                            except (KeyError, TypeError, AttributeError):
+                                continue
+
+                    # 加载已推送缓存
+                    cache_file = TWITTER_CACHE_DIR / f"{username}.json"
+                    seen = set()
+                    if cache_file.exists():
+                        seen = set(json.loads(cache_file.read_text(encoding="utf-8")))
+
+                    new_tweets = []
+                    for tw in tweets:
+                        if tw["tweet_id"] in seen:
                             continue
-                    new_tweets.append(tw)
-                    seen.add(tw["tweet_id"])
+                        if filter_kw_lower:
+                            text_lower = tw["text"].lower()
+                            if not any(kw in text_lower for kw in filter_kw_lower):
+                                continue
+                        new_tweets.append(tw)
+                        seen.add(tw["tweet_id"])
 
-                # 保存缓存
-                trimmed = sorted(seen)[-200:]
-                cache_file.write_text(json.dumps(trimmed, ensure_ascii=False), encoding="utf-8")
+                    # 保存缓存
+                    trimmed = sorted(seen)[-200:]
+                    cache_file.write_text(json.dumps(trimmed, ensure_ascii=False), encoding="utf-8")
 
-                all_account_tweets[username] = {"new": new_tweets, "all": tweets}
-                st.caption(f"✅ @{username} — {len(new_tweets)} 条新推文 / {len(tweets)} 条总计")
+                    all_account_tweets[username] = {"new": new_tweets, "all": tweets}
+                    st.caption(f"✅ @{username} — {len(new_tweets)} 条新推文 / {len(tweets)} 条总计")
+                    success = True
 
-            except Exception as e:
-                st.warning(f"⚠️ @{username} 失败: {e}")
+                except Exception as e:
+                    if '429' in str(e):
+                        retry_count += 1
+                        wait = 15 + retry_count * 15
+                        status_area.warning(f"⚠️ @{username} 触发限流，等待 {wait}s 后重试 ({retry_count}/{max_retries})")
+                        time.sleep(wait)
+                    else:
+                        st.warning(f"⚠️ @{username} 失败: {e}")
+                        break
+
+            if not success and retry_count >= max_retries:
+                st.warning(f"⚠️ @{username} 重试 {max_retries} 次仍失败，跳过")
 
             if idx < total - 1:
-                time.sleep(2)
+                time.sleep(5)  # 账号之间间隔 5 秒
+
+        status_area.empty()
 
         progress.progress(1.0, text="采集完成！")
         st.divider()

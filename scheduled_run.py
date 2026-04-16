@@ -740,6 +740,8 @@ def _get_twitter_user_tweets(user_id, api_key, count=20):
     url = f"https://{TWITTER_API_HOST}/user-tweets"
     resp = http_requests.get(url, params={"user": user_id, "count": str(count)},
                              headers=_twitter_headers(api_key), timeout=15)
+    if resp.status_code == 429:
+        raise Exception("429 Too Many Requests")
     resp.raise_for_status()
     return resp.json()
 
@@ -818,40 +820,57 @@ def fetch_twitter(config):
 
     for username in accounts:
         print(f"  📡 采集 @{username}...")
-        try:
-            user_id = _get_twitter_user_id(username, api_key)
-            if not user_id:
-                print(f"    -> 未找到用户")
-                continue
+        retry_count = 0
+        success = False
 
-            raw = _get_twitter_user_tweets(user_id, api_key, count=max_tweets)
-            tweets = _extract_tweets(raw)
-            seen = _load_seen_tweets(username)
+        while retry_count < 3 and not success:
+            try:
+                user_id = _get_twitter_user_id(username, api_key)
+                if not user_id:
+                    print(f"    -> 未找到用户")
+                    success = True
+                    break
 
-            new_tweets = []
-            for tw in tweets:
-                if tw["tweet_id"] in seen:
-                    continue
-                # 关键词过滤（如果配了过滤词，只保留匹配的；未配置则全部保留）
-                if filter_kw:
-                    text_lower = tw["text"].lower()
-                    if not any(kw in text_lower for kw in filter_kw):
+                time.sleep(3)  # user 和 tweets 之间间隔
+
+                raw = _get_twitter_user_tweets(user_id, api_key, count=max_tweets)
+                tweets = _extract_tweets(raw)
+                seen = _load_seen_tweets(username)
+
+                new_tweets = []
+                for tw in tweets:
+                    if tw["tweet_id"] in seen:
                         continue
-                new_tweets.append(tw)
-                seen.add(tw["tweet_id"])
+                    if filter_kw:
+                        text_lower = tw["text"].lower()
+                        if not any(kw in text_lower for kw in filter_kw):
+                            continue
+                    new_tweets.append(tw)
+                    seen.add(tw["tweet_id"])
 
-            _save_seen_tweets(username, seen)
+                _save_seen_tweets(username, seen)
 
-            if new_tweets:
-                all_new_tweets[username] = new_tweets
-                print(f"    -> {len(new_tweets)} 条新推文")
-            else:
-                print(f"    -> 无新推文")
+                if new_tweets:
+                    all_new_tweets[username] = new_tweets
+                    print(f"    -> {len(new_tweets)} 条新推文")
+                else:
+                    print(f"    -> 无新推文")
+                success = True
 
-        except Exception as e:
-            print(f"    -> 失败: {e}")
+            except Exception as e:
+                if '429' in str(e):
+                    retry_count += 1
+                    wait = 15 + retry_count * 15
+                    print(f"    ⚠️ 429 限流，等待 {wait}s 后重试 ({retry_count}/3)")
+                    time.sleep(wait)
+                else:
+                    print(f"    -> 失败: {e}")
+                    break
 
-        time.sleep(2)  # 账号之间间隔
+        if not success and retry_count >= 3:
+            print(f"    ❌ 重试耗尽，跳过")
+
+        time.sleep(5)  # 账号之间间隔 5 秒
 
     return all_new_tweets
 
