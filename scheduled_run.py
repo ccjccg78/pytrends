@@ -369,10 +369,10 @@ def fetch_rising_queries(config):
             print(f"  ❌ 重试耗尽，跳过")
 
         if i < len(kw_list) - 1:
-            # 每10个词休息5分钟，避免触发限流
+            # 每10个词休息2分钟，避免触发限流
             if (i + 1) % 10 == 0:
-                print(f"  ⏸ 已完成 {i+1}/{len(kw_list)}，休息5分钟避免限流...")
-                time.sleep(5 * 60)
+                print(f"  ⏸ 已完成 {i+1}/{len(kw_list)}，休息2分钟避免限流...")
+                time.sleep(2 * 60)
             else:
                 time.sleep(effective_interval + random.uniform(0, 2))
 
