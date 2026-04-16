@@ -72,6 +72,13 @@
         "https://example.com/sitemap.xml"
     ],
 
+    "twitter": {
+        "rapidapi_key": "",
+        "accounts": ["rohanpaul_ai", "arrakis_ai", "testingcatalog"],
+        "max_tweets_per_account": 20,
+        "filter_keywords": ["AI", "tool", "agent", "LLM", "GPT", "Claude", "open-source", "launch", "release", "new"]
+    },
+
     "notify": {
         "feishu_webhook": "",
         "wecom_webhook": "",

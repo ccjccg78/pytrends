@@ -318,7 +318,7 @@ with st.sidebar:
 # ════════════════════════════════════════════════════════════════
 # 主区域 - 标签页
 # ════════════════════════════════════════════════════════════════
-tab1, tab2, tab3 = st.tabs(["🔍 爆增词追踪", "🔥 时下流行", "🗺 Sitemap 监控"])
+tab1, tab2, tab3, tab4 = st.tabs(["🔍 爆增词追踪", "🔥 时下流行", "🗺 Sitemap 监控", "🐦 Twitter 监控"])
 
 # ════════════════════════════════════════════════════════════════
 # Tab 1: 爆增词追踪
@@ -984,3 +984,254 @@ with tab3:
                     st.warning("⚠️ 飞书通知发送异常")
         else:
             st.success("✅ 所有站点无变化")
+
+
+# ════════════════════════════════════════════════════════════════
+# Tab 4: Twitter 监控
+# ════════════════════════════════════════════════════════════════
+with tab4:
+    st.title("🐦 Twitter 监控")
+    st.caption("监控 Twitter 账号最新动态，通过 RapidAPI Twttr API 获取推文")
+
+    TWITTER_API_HOST = "twitter241.p.rapidapi.com"
+    TWITTER_CACHE_DIR = Path(__file__).parent / "output" / "twitter"
+
+    tw_config = APP_CONFIG.get("twitter", {})
+    tw_api_key = tw_config.get("rapidapi_key", "")
+    tw_accounts = tw_config.get("accounts", ["rohanpaul_ai", "arrakis_ai", "testingcatalog"])
+    tw_max_tweets = tw_config.get("max_tweets_per_account", 20)
+    tw_filter_kw = tw_config.get("filter_keywords", [])
+
+    # ── 配置区 ──
+    st.subheader("📋 监控账号")
+
+    if not tw_api_key:
+        st.warning("⚠️ 未配置 RapidAPI Key，请在 config.json 的 twitter.rapidapi_key 中填入你的 Key")
+
+    # 账号列表
+    if tw_accounts:
+        for i, acct in enumerate(tw_accounts):
+            has_cache = (TWITTER_CACHE_DIR / f"{acct}.json").exists()
+            status = "✅ 已有缓存" if has_cache else "🆕 待首次采集"
+            col_name, col_del = st.columns([5, 0.8])
+            with col_name:
+                st.markdown(f"**{i+1}.** `@{acct}`  {status}")
+            with col_del:
+                if st.button("🗑", key=f"del_tw_{i}", help="删除此账号"):
+                    tw_accounts.pop(i)
+                    if "twitter" not in APP_CONFIG:
+                        APP_CONFIG["twitter"] = {}
+                    APP_CONFIG["twitter"]["accounts"] = tw_accounts
+                    save_config(APP_CONFIG)
+                    st.rerun()
+    else:
+        st.info("暂无监控账号，请在下方添加。")
+
+    new_accounts = st.text_input("添加账号（逗号分隔，不含 @）",
+                                  placeholder="username1, username2",
+                                  key="tw_new_accounts")
+    if st.button("➕ 添加账号", key="add_tw_account"):
+        if new_accounts.strip():
+            added = 0
+            for name in new_accounts.split(","):
+                name = name.strip().lstrip("@")
+                if name and name not in tw_accounts:
+                    tw_accounts.append(name)
+                    added += 1
+            if added > 0:
+                if "twitter" not in APP_CONFIG:
+                    APP_CONFIG["twitter"] = {}
+                APP_CONFIG["twitter"]["accounts"] = tw_accounts
+                save_config(APP_CONFIG)
+                st.success(f"已添加 {added} 个账号")
+                st.rerun()
+            else:
+                st.warning("没有新账号可添加")
+
+    # 过滤关键词
+    st.divider()
+    tw_kw_str = ", ".join(tw_filter_kw)
+    tw_kw_input = st.text_input("过滤关键词（逗号分隔，留空=不过滤）",
+                                 value=tw_kw_str,
+                                 help="只保留包含这些关键词的推文；留空则保留全部",
+                                 key="tw_filter_kw")
+    if st.button("💾 保存过滤词", key="save_tw_filter"):
+        new_kw = [w.strip() for w in tw_kw_input.split(",") if w.strip()]
+        if "twitter" not in APP_CONFIG:
+            APP_CONFIG["twitter"] = {}
+        APP_CONFIG["twitter"]["filter_keywords"] = new_kw
+        save_config(APP_CONFIG)
+        st.success("已保存")
+        st.rerun()
+
+    st.divider()
+
+    # ── 采集按钮 ──
+    start_twitter = st.button("🐦 立即采集", type="primary", use_container_width=True,
+                               disabled=not tw_api_key or not tw_accounts)
+
+    if start_twitter:
+        def _tw_headers(api_key):
+            return {"x-rapidapi-host": TWITTER_API_HOST, "x-rapidapi-key": api_key}
+
+        TWITTER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        filter_kw_lower = [kw.lower() for kw in tw_filter_kw] if tw_filter_kw else []
+
+        progress = st.progress(0, text="开始采集...")
+        total = len(tw_accounts)
+        all_account_tweets = {}  # {username: [tweet, ...]}
+
+        for idx, username in enumerate(tw_accounts):
+            progress.progress(idx / total, text=f"采集 @{username}...")
+
+            try:
+                # 获取 user_id
+                user_resp = http_requests.get(
+                    f"https://{TWITTER_API_HOST}/user",
+                    params={"username": username},
+                    headers=_tw_headers(tw_api_key), timeout=15)
+                user_resp.raise_for_status()
+                user_data = user_resp.json()
+                result = user_data.get("result", user_data)
+                if "data" in result:
+                    result = result["data"]
+                if "user" in result:
+                    result = result["user"]
+                if "result" in result:
+                    result = result["result"]
+                user_id = result.get("rest_id", "")
+                if not user_id:
+                    st.warning(f"⚠️ @{username} 未找到用户")
+                    continue
+
+                # 获取推文
+                tweets_resp = http_requests.get(
+                    f"https://{TWITTER_API_HOST}/user-tweets",
+                    params={"user": user_id, "count": str(tw_max_tweets)},
+                    headers=_tw_headers(tw_api_key), timeout=15)
+                tweets_resp.raise_for_status()
+                raw = tweets_resp.json()
+
+                # 解析推文
+                tweets = []
+                instructions = (raw.get("result", raw)
+                                .get("timeline", {})
+                                .get("timeline", {})
+                                .get("instructions", []))
+                for inst in instructions:
+                    for entry in inst.get("entries", []):
+                        try:
+                            tweet_results = (entry.get("content", {})
+                                             .get("itemContent", {})
+                                             .get("tweet_results", {})
+                                             .get("result", {}))
+                            if not tweet_results:
+                                continue
+                            legacy = tweet_results.get("legacy", {})
+                            note = (tweet_results.get("note_tweet", {})
+                                    .get("note_tweet_results", {})
+                                    .get("result", {})
+                                    .get("text", ""))
+                            text = note if note else legacy.get("full_text", "")
+                            created_at = legacy.get("created_at", "")
+                            tweet_id = legacy.get("id_str", entry.get("entryId", ""))
+                            if text:
+                                tweets.append({
+                                    "text": text,
+                                    "created_at": created_at,
+                                    "tweet_id": tweet_id,
+                                })
+                        except (KeyError, TypeError, AttributeError):
+                            continue
+
+                # 加载已推送缓存
+                cache_file = TWITTER_CACHE_DIR / f"{username}.json"
+                seen = set()
+                if cache_file.exists():
+                    seen = set(json.loads(cache_file.read_text(encoding="utf-8")))
+
+                new_tweets = []
+                for tw in tweets:
+                    if tw["tweet_id"] in seen:
+                        continue
+                    if filter_kw_lower:
+                        text_lower = tw["text"].lower()
+                        if not any(kw in text_lower for kw in filter_kw_lower):
+                            continue
+                    new_tweets.append(tw)
+                    seen.add(tw["tweet_id"])
+
+                # 保存缓存
+                trimmed = sorted(seen)[-200:]
+                cache_file.write_text(json.dumps(trimmed, ensure_ascii=False), encoding="utf-8")
+
+                all_account_tweets[username] = {"new": new_tweets, "all": tweets}
+                st.caption(f"✅ @{username} — {len(new_tweets)} 条新推文 / {len(tweets)} 条总计")
+
+            except Exception as e:
+                st.warning(f"⚠️ @{username} 失败: {e}")
+
+            if idx < total - 1:
+                time.sleep(2)
+
+        progress.progress(1.0, text="采集完成！")
+        st.divider()
+
+        # 汇总显示
+        has_new = any(v["new"] for v in all_account_tweets.values())
+
+        if has_new:
+            total_new = sum(len(v["new"]) for v in all_account_tweets.values())
+            st.subheader(f"🆕 发现 {total_new} 条新推文")
+
+            # 飞书通知
+            notify = load_notify_config()
+            webhook = notify.get("feishu_webhook", "")
+            if webhook:
+                now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+                content_lines = [
+                    [{"tag": "text", "text": f"📅 {now}\n{sum(1 for v in all_account_tweets.values() if v['new'])} 个账号有新动态，共 {total_new} 条推文"}],
+                ]
+                for uname, data in all_account_tweets.items():
+                    if not data["new"]:
+                        continue
+                    content_lines.append([{"tag": "text", "text": f"\n🐦 @{uname}（{len(data['new'])} 条新推文）:"}])
+                    for tw in data["new"][:10]:
+                        snippet = tw["text"].replace("\n", " ")
+                        if len(snippet) > 120:
+                            snippet = snippet[:120] + "..."
+                        content_lines.append([{"tag": "text", "text": f"  {snippet}"}])
+                    if len(data["new"]) > 10:
+                        content_lines.append([{"tag": "text", "text": f"  ...等共 {len(data['new'])} 条"}])
+
+                payload = {
+                    "msg_type": "post",
+                    "content": {"post": {"zh_cn": {
+                        "title": "🐦 Twitter 监控报告",
+                        "content": content_lines,
+                    }}}
+                }
+                try:
+                    feishu_resp = http_requests.post(webhook, json=payload, timeout=10)
+                    if feishu_resp.status_code == 200:
+                        st.success("✅ 飞书通知已发送")
+                    else:
+                        st.warning(f"⚠️ 飞书通知失败: {feishu_resp.status_code}")
+                except Exception:
+                    st.warning("⚠️ 飞书通知发送异常")
+
+        # 展示所有账号推文
+        for uname, data in all_account_tweets.items():
+            tweets_to_show = data["new"] if data["new"] else data["all"][:5]
+            label_suffix = f"+{len(data['new'])} 条新推文" if data["new"] else "无新推文"
+            with st.expander(f"🐦 @{uname}（{label_suffix}）", expanded=bool(data["new"])):
+                for tw in tweets_to_show:
+                    is_new = tw in data["new"]
+                    prefix = "🆕 " if is_new else ""
+                    st.markdown(f"{prefix}**{tw.get('created_at', '')[:16]}**")
+                    st.text(tw["text"][:500])
+                    st.markdown(f"[查看原文](https://x.com/{uname}/status/{tw['tweet_id']})")
+                    st.markdown("---")
+
+        if not has_new:
+            st.success("✅ 所有账号无新推文")

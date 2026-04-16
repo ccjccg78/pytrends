@@ -9,11 +9,13 @@
      0 21 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode trending
      0 22,9 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode sitemap
      0 0 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode rising
+     0 */4 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode twitter
 
 支持模式:
   --mode trending  采集所有地区时下流行 (默认)
   --mode rising    采集关键词爆增词
   --mode sitemap   监控竞品 Sitemap 变化
+  --mode twitter   监控 Twitter 账号动态
 """
 
 import json
@@ -703,6 +705,198 @@ def send_sitemap_feishu(webhook_url, all_changes):
         print(f"❌ 飞书通知异常: {e}")
 
 
+# ── Twitter 监控 ────────────────────────────────────────────────
+TWITTER_API_HOST = "twitter241.p.rapidapi.com"
+TWITTER_CACHE_DIR = Path(__file__).parent / "output" / "twitter"
+
+
+def _twitter_headers(api_key):
+    return {
+        "x-rapidapi-host": TWITTER_API_HOST,
+        "x-rapidapi-key": api_key,
+    }
+
+
+def _get_twitter_user_id(username, api_key):
+    """通过 username 获取 Twitter 用户 rest_id"""
+    url = f"https://{TWITTER_API_HOST}/user"
+    resp = http_requests.get(url, params={"username": username},
+                             headers=_twitter_headers(api_key), timeout=15)
+    resp.raise_for_status()
+    data = resp.json()
+    # 尝试多种返回结构
+    result = data.get("result", data)
+    if "data" in result:
+        result = result["data"]
+    if "user" in result:
+        result = result["user"]
+    if "result" in result:
+        result = result["result"]
+    return result.get("rest_id", "")
+
+
+def _get_twitter_user_tweets(user_id, api_key, count=20):
+    """获取用户最新推文"""
+    url = f"https://{TWITTER_API_HOST}/user-tweets"
+    resp = http_requests.get(url, params={"user": user_id, "count": str(count)},
+                             headers=_twitter_headers(api_key), timeout=15)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _extract_tweets(raw_data):
+    """从 API 返回结构中提取推文列表 [{text, created_at, tweet_id}, ...]"""
+    tweets = []
+    # 遍历 timeline 指令找到推文条目
+    instructions = (raw_data.get("result", raw_data)
+                    .get("timeline", {})
+                    .get("timeline", {})
+                    .get("instructions", []))
+    for inst in instructions:
+        entries = inst.get("entries", [])
+        for entry in entries:
+            try:
+                tweet_results = (entry.get("content", {})
+                                 .get("itemContent", {})
+                                 .get("tweet_results", {})
+                                 .get("result", {}))
+                if not tweet_results:
+                    continue
+                legacy = tweet_results.get("legacy", {})
+                # 优先取 note_tweet（长推文），否则取 legacy.full_text
+                note = (tweet_results.get("note_tweet", {})
+                        .get("note_tweet_results", {})
+                        .get("result", {})
+                        .get("text", ""))
+                text = note if note else legacy.get("full_text", "")
+                created_at = legacy.get("created_at", "")
+                tweet_id = legacy.get("id_str", entry.get("entryId", ""))
+                if text:
+                    tweets.append({
+                        "text": text,
+                        "created_at": created_at,
+                        "tweet_id": tweet_id,
+                    })
+            except (KeyError, TypeError, AttributeError):
+                continue
+    return tweets
+
+
+def _load_seen_tweets(username):
+    """加载已推送过的推文 ID 集合"""
+    cache_file = TWITTER_CACHE_DIR / f"{username}.json"
+    if cache_file.exists():
+        return set(json.loads(cache_file.read_text(encoding="utf-8")))
+    return set()
+
+
+def _save_seen_tweets(username, seen_ids):
+    """保存已推送过的推文 ID（只保留最近 200 条）"""
+    TWITTER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_file = TWITTER_CACHE_DIR / f"{username}.json"
+    trimmed = sorted(seen_ids)[-200:]
+    cache_file.write_text(json.dumps(trimmed, ensure_ascii=False), encoding="utf-8")
+
+
+def fetch_twitter(config):
+    """采集所有监控账号的最新推文，返回新推文汇总"""
+    tw_config = config.get("twitter", {})
+    api_key = tw_config.get("rapidapi_key", "")
+    accounts = tw_config.get("accounts", [])
+    max_tweets = tw_config.get("max_tweets_per_account", 20)
+    filter_kw = [kw.lower() for kw in tw_config.get("filter_keywords", [])]
+
+    if not api_key:
+        print("❌ 未配置 twitter.rapidapi_key，跳过")
+        return {}
+    if not accounts:
+        print("❌ 未配置 twitter.accounts，跳过")
+        return {}
+
+    TWITTER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    all_new_tweets = {}  # {username: [tweet, ...]}
+
+    for username in accounts:
+        print(f"  📡 采集 @{username}...")
+        try:
+            user_id = _get_twitter_user_id(username, api_key)
+            if not user_id:
+                print(f"    -> 未找到用户")
+                continue
+
+            raw = _get_twitter_user_tweets(user_id, api_key, count=max_tweets)
+            tweets = _extract_tweets(raw)
+            seen = _load_seen_tweets(username)
+
+            new_tweets = []
+            for tw in tweets:
+                if tw["tweet_id"] in seen:
+                    continue
+                # 关键词过滤（如果配了过滤词，只保留匹配的；未配置则全部保留）
+                if filter_kw:
+                    text_lower = tw["text"].lower()
+                    if not any(kw in text_lower for kw in filter_kw):
+                        continue
+                new_tweets.append(tw)
+                seen.add(tw["tweet_id"])
+
+            _save_seen_tweets(username, seen)
+
+            if new_tweets:
+                all_new_tweets[username] = new_tweets
+                print(f"    -> {len(new_tweets)} 条新推文")
+            else:
+                print(f"    -> 无新推文")
+
+        except Exception as e:
+            print(f"    -> 失败: {e}")
+
+        time.sleep(2)  # 账号之间间隔
+
+    return all_new_tweets
+
+
+def send_twitter_feishu(webhook_url, all_new_tweets):
+    """推送 Twitter 监控结果到飞书"""
+    now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+    total = sum(len(v) for v in all_new_tweets.values())
+
+    content_lines = [
+        [{"tag": "text", "text": f"📅 {now}\n监控 {len(all_new_tweets)} 个账号有新动态，共 {total} 条推文"}],
+    ]
+
+    for username, tweets in all_new_tweets.items():
+        content_lines.append([{"tag": "text", "text": f"\n🐦 @{username}（{len(tweets)} 条新推文）:"}])
+        for tw in tweets[:10]:
+            # 截取前 120 字符，避免消息过长
+            snippet = tw["text"].replace("\n", " ")
+            if len(snippet) > 120:
+                snippet = snippet[:120] + "..."
+            time_str = ""
+            if tw.get("created_at"):
+                time_str = f" [{tw['created_at'][:16]}]"
+            content_lines.append([{"tag": "text", "text": f"  {snippet}{time_str}"}])
+        if len(tweets) > 10:
+            content_lines.append([{"tag": "text", "text": f"  ...等共 {len(tweets)} 条"}])
+
+    payload = {
+        "msg_type": "post",
+        "content": {"post": {"zh_cn": {
+            "title": "🐦 Twitter 监控报告",
+            "content": content_lines,
+        }}}
+    }
+
+    try:
+        resp = http_requests.post(webhook_url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            print("✅ 飞书 Twitter 通知发送成功")
+        else:
+            print(f"❌ 飞书通知失败: {resp.status_code} {resp.text}")
+    except Exception as e:
+        print(f"❌ 飞书通知异常: {e}")
+
+
 # ── 保存结果 ──────────────────────────────────────────────────
 def save_trending_csv(all_results):
     import pandas as pd
@@ -719,8 +913,8 @@ def save_trending_csv(all_results):
 # ── 主流程 ────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=['trending', 'rising', 'sitemap'], default='trending',
-                        help='trending=时下流行, rising=爆增词追踪, sitemap=Sitemap监控')
+    parser.add_argument('--mode', choices=['trending', 'rising', 'sitemap', 'twitter'], default='trending',
+                        help='trending=时下流行, rising=爆增词追踪, sitemap=Sitemap监控, twitter=Twitter监控')
     args = parser.parse_args()
 
     now_bj = datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
@@ -778,6 +972,21 @@ def main():
             print(f"\n✅ 完成! {len(all_changes)} 个站点有更新，共 {total_new} 个新 URL")
         else:
             print("✅ 所有站点无变化")
+
+    elif args.mode == 'twitter':
+        # Twitter 监控
+        tw_accounts = config.get("twitter", {}).get("accounts", [])
+        print(f"\n🐦 开始监控 {len(tw_accounts)} 个 Twitter 账号...")
+        all_new_tweets = fetch_twitter(config)
+
+        if all_new_tweets:
+            total = sum(len(v) for v in all_new_tweets.values())
+            if webhook:
+                print("\n📮 发送飞书通知...")
+                send_twitter_feishu(webhook, all_new_tweets)
+            print(f"\n✅ 完成! {len(all_new_tweets)} 个账号有新动态，共 {total} 条推文")
+        else:
+            print("✅ 所有账号无新推文")
 
 
 if __name__ == "__main__":
