@@ -55,9 +55,9 @@ ALL_REGIONS = [
 # 流量阈值（注意：RSS 的 approx_traffic 是短时搜索热度，非严格日搜索量）
 # 单次采集阈值：单次 approx_traffic > 1000 直接入选
 TRAFFIC_THRESHOLD = 1000
-# 累计阈值：同一话题连续3天累计 approx_traffic > 1000 也入选
+# 累计阈值：同一话题连续3天都出现且累计 approx_traffic > 2000 也入选
 CUMULATIVE_DAYS = 3
-CUMULATIVE_THRESHOLD = 1000
+CUMULATIVE_THRESHOLD = 2000
 
 # 历史记录文件（用于跨天累计判断）
 HISTORY_PATH = Path(__file__).parent / "output" / "trending_history.json"
@@ -65,7 +65,7 @@ HISTORY_PATH = Path(__file__).parent / "output" / "trending_history.json"
 # 默认过滤词库（可通过 config.json 的 exclude_categories 和 exclude_words 覆盖）
 DEFAULT_EXCLUDE_CATEGORIES = {
     "赌博": ["casino", "gambling", "gamble", "bet ", "betting", "slot machine", "poker", "roulette",
-            "blackjack", "lottery", "jackpot", "wager", "sportsbook"],
+            "blackjack", "lottery", "jackpot", "wager", "sportsbook", "ranking kasyn", "plcasino"],
     "人名/明星": ["wife", "husband", "boyfriend", "girlfriend", "married", "dating",
                  "net worth", "birthday", "born", "died", "death", "funeral", "obituary",
                  "son of", "daughter of", "who is", "how old"],
@@ -75,7 +75,8 @@ DEFAULT_EXCLUDE_CATEGORIES = {
             "serie a", "bundesliga", "vs ", " vs"],
     "娱乐/影视": ["movie", "trailer", "episode", "season finale", "netflix", "hulu",
                  "disney+", "box office", "premiere", "concert", "tour dates",
-                 "album release", "grammy", "oscar", "emmy"],
+                 "album release", "grammy", "oscar", "emmy", "movie review",
+                 "collection day", "box office collection"],
     "新闻/时事": ["shooting", "earthquake", "hurricane", "tornado", "flood", "crash",
                  "explosion", "protest", "riot", "scandal", "arrested", "convicted",
                  "sentenced", "indicted", "breaking news", "election", "vote"],
@@ -159,8 +160,21 @@ def save_history(history):
 
 
 def get_cumulative_traffic(history, key):
-    """计算某个话题在 CUMULATIVE_DAYS 天内的累计流量"""
+    """计算某个话题在 CUMULATIVE_DAYS 天内的累计流量，要求连续每天都出现"""
     records = history.get(key, [])
+    if len(records) < CUMULATIVE_DAYS:
+        return 0  # 不满足连续天数要求
+    # 检查是否连续 CUMULATIVE_DAYS 天都有记录
+    dates = sorted(set(r["date"] for r in records))
+    if len(dates) < CUMULATIVE_DAYS:
+        return 0
+    # 取最近 CUMULATIVE_DAYS 个日期，检查是否连续
+    recent_dates = dates[-CUMULATIVE_DAYS:]
+    for i in range(1, len(recent_dates)):
+        d1 = datetime.strptime(recent_dates[i - 1], "%Y-%m-%d")
+        d2 = datetime.strptime(recent_dates[i], "%Y-%m-%d")
+        if (d2 - d1).days != 1:
+            return 0  # 日期不连续
     return sum(r["traffic"] for r in records)
 
 
@@ -170,7 +184,7 @@ def fetch_all_trending(config=None):
 
     入选条件（满足任一即可）：
       1. 单次 approx_traffic > TRAFFIC_THRESHOLD (1000)
-      2. 同一话题近 CUMULATIVE_DAYS (3) 天累计 approx_traffic > CUMULATIVE_THRESHOLD (1000)
+      2. 同一话题连续 CUMULATIVE_DAYS (3) 天出现且累计 approx_traffic > CUMULATIVE_THRESHOLD (2000)
     """
     all_results = []
     history = load_history()
@@ -255,7 +269,7 @@ def send_trending_feishu(webhook_url, all_results):
 
     # 汇总信息
     content_lines = [
-        [{"tag": "text", "text": f"📅 {now}\n共采集 {len(ALL_REGIONS)} 个地区，找到 {len(all_results)} 条热搜（单次>{TRAFFIC_THRESHOLD} 或 {CUMULATIVE_DAYS}天累计>{CUMULATIVE_THRESHOLD}）"}],
+        [{"tag": "text", "text": f"📅 {now}\n共采集 {len(ALL_REGIONS)} 个地区，找到 {len(all_results)} 条热搜（单次>{TRAFFIC_THRESHOLD} 或 连续{CUMULATIVE_DAYS}天>{CUMULATIVE_THRESHOLD}）"}],
         [{"tag": "text", "text": "\n📊 全球热搜:"}],
     ]
 
@@ -374,6 +388,8 @@ def analyze_spikes(all_rising, config):
         return pd.DataFrame(), {}
 
     combined = pd.concat(all_rising, ignore_index=True)
+    # 过滤掉排除关键词（复用 trending 的过滤规则）
+    combined = combined[~combined['query'].apply(lambda q: is_excluded(q, config))].reset_index(drop=True)
     combined['value_num'] = pd.to_numeric(combined['value'], errors='coerce')
 
     spike_top_n = config.get("spike_top_n", 20)
@@ -630,13 +646,17 @@ def check_sitemaps(config):
             # 对比差异
             added = new_urls - old_urls
             if added:
-                all_changes[domain] = {
-                    'url': url,
-                    'new_urls': sorted(added),
-                    'total': len(new_urls),
-                    'old_total': len(old_urls),
-                }
-                print(f"    -> 发现 {len(added)} 个新 URL（总计 {len(old_urls)} -> {len(new_urls)}）")
+                if not old_urls:
+                    # 首次检测该站点，只保存基准数据，不推送通知（避免全量推送噪音）
+                    print(f"    -> 首次检测，保存基准 {len(new_urls)} 个 URL（不推送通知）")
+                else:
+                    all_changes[domain] = {
+                        'url': url,
+                        'new_urls': sorted(added),
+                        'total': len(new_urls),
+                        'old_total': len(old_urls),
+                    }
+                    print(f"    -> 发现 {len(added)} 个新 URL（总计 {len(old_urls)} -> {len(new_urls)}）")
             else:
                 print(f"    -> 无变化（共 {len(new_urls)} 个 URL）")
 

@@ -16,7 +16,27 @@
         "Finder", "Discover", "Explore",
         "Compare", "Comparison", "Alternatives", "Similar",
         "Picks", "Recommendation", "Recommend",
-        "Open-source", "Enterprise"
+        "Open-source", "Enterprise",
+        "Translator", "Generator", "Example", "Convert", "Online",
+        "Downloader", "Maker", "Creator", "Editor", "Processor",
+        "Designer", "Compiler", "Analyzer", "Evaluator", "Sender",
+        "Receiver", "Interpreter", "Uploader", "Calculator", "Sample",
+        "Template", "Format", "Builder", "Scheme", "Pattern",
+        "Checker", "Detector", "Scraper", "Manager", "Explorer",
+        "Dashboard", "Planner", "Tracker", "Recorder", "Optimizer",
+        "Scheduler", "Converter", "Viewer", "Extractor", "Monitor",
+        "Notifier", "Verifier", "Simulator", "Assistant", "Constructor",
+        "Comparator", "Navigator", "Syncer", "Connector", "Cataloger", "Responder",
+
+        "ChatGPT", "Claude", "Gemini", "GPT", "LLM",
+        "AI tool", "AI agent", "AI chatbot", "AI assistant",
+        "AI generator", "AI image", "AI video", "AI voice",
+        "AI coding", "AI writing", "AI SaaS", "AI app",
+        "AI startup", "AI productivity", "AI workflow", "AI automation",
+        "Midjourney", "Stable Diffusion", "Perplexity", "Cursor",
+
+        "web game", "browser game", "io game", "casual game",
+        "mini game", "HTML5 game", "online game free"
     ],
 
     "geo": "",
