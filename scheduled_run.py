@@ -1544,7 +1544,7 @@ def _download_whoisds(date_str=None):
     # WhoisDS 的 URL 需要 base64 编码的日期
     import base64
     date_b64 = base64.b64encode(date_str.encode()).decode()
-    url = f"https://whoisds.com/whois-database/newly-registered-domains/{date_b64}/nrd"
+    url = f"https://whoisds.com//whois-database/newly-registered-domains/{date_b64}.zip/nrd"
 
     print(f"  📡 从 WhoisDS 下载 {date_str} 新注册域名...")
     print(f"     URL: {url}")

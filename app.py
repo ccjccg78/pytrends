@@ -1795,7 +1795,7 @@ with tab6:
 
             date_str = download_date.strftime("%Y-%m-%d")
             date_b64 = base64.b64encode(date_str.encode()).decode()
-            url = f"https://whoisds.com/whois-database/newly-registered-domains/{date_b64}/nrd"
+            url = f"https://whoisds.com//whois-database/newly-registered-domains/{date_b64}.zip/nrd"
 
             with st.spinner(f"正在下载 {date_str} 新注册域名..."):
                 try:
