@@ -1778,13 +1778,13 @@ with tab6:
     # ── 输入区 ──
     st.subheader("📥 获取新注册域名")
 
-    input_method = st.radio("数据来源", ["自动下载（WhoisDS 免费）", "手动粘贴", "上传文件"],
+    input_method = st.radio("数据来源", ["自动下载（免费）", "手动粘贴", "上传文件"],
                              horizontal=True, key="domain_source")
 
     domain_input = ""
 
-    if input_method == "自动下载（WhoisDS 免费）":
-        st.caption("从 WhoisDS 自动下载昨日新注册域名列表（免费，每日更新，通常包含数十万域名）")
+    if input_method == "自动下载（免费）":
+        st.caption("从 whoisdownload.com 自动下载新注册域名列表（免费，每日约 7 万域名，保留近 4 天）")
         download_date = st.date_input("选择日期（默认昨天）",
                                         value=datetime.now(BEIJING_TZ).date() - timedelta(days=1),
                                         key="whoisds_date")
@@ -1794,31 +1794,30 @@ with tab6:
             import base64
 
             date_str = download_date.strftime("%Y-%m-%d")
-            date_b64 = base64.b64encode(date_str.encode()).decode()
-            url = f"https://whoisds.com//whois-database/newly-registered-domains/{date_b64}.zip/nrd"
+            date_zip = f"{date_str}.zip"
+            date_b64 = base64.b64encode(date_zip.encode()).decode()
+            url = f"https://www.whoisdownload.com/download-panel/free-download-file/{date_b64}/nrd/home"
 
             with st.spinner(f"正在下载 {date_str} 新注册域名..."):
                 try:
                     resp = http_requests.get(url, timeout=120, headers={
                         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                        'Accept': 'application/zip, application/octet-stream, */*',
-                        'Referer': 'https://whoisds.com/newly-registered-domains',
+                        'Referer': 'https://www.whoisdownload.com/newly-registered-domains',
                     }, allow_redirects=True)
 
                     if resp.status_code != 200:
                         st.error(f"下载失败: HTTP {resp.status_code}")
-                    elif b'PK' not in resp.content[:4] and 'zip' not in resp.headers.get('Content-Type', '').lower():
-                        st.error(f"{date_str} 的数据暂未发布，请尝试更早的日期")
+                    elif resp.content[:4] != b'PK\x03\x04':
+                        st.error(f"{date_str} 的数据暂未发布，请尝试更早的日期（免费仅保留近 4 天）")
                     else:
                         zf = zipfile.ZipFile(_io.BytesIO(resp.content))
                         domains_list = []
                         for name in zf.namelist():
-                            if name.endswith('.txt') or name.endswith('.csv'):
-                                text = zf.read(name).decode('utf-8', errors='ignore')
-                                for line in text.splitlines():
-                                    d = line.strip()
-                                    if d and not d.startswith('#'):
-                                        domains_list.append(d)
+                            text = zf.read(name).decode('utf-8', errors='ignore')
+                            for line in text.splitlines():
+                                d = line.strip()
+                                if d and not d.startswith('#'):
+                                    domains_list.append(d)
                         st.session_state["whoisds_domains"] = "\n".join(domains_list)
                         st.success(f"✅ 下载完成: {len(domains_list)} 个域名（{date_str}）")
                 except Exception as e:

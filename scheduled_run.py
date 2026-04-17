@@ -1524,65 +1524,58 @@ def _filter_domains(domains):
 
 
 def _download_whoisds(date_str=None):
-    """从 WhoisDS 下载指定日期的新注册域名 ZIP，解压后返回域名列表
+    """从 whoisdownload.com 下载指定日期的新注册域名 ZIP，解压后返回域名列表
 
-    WhoisDS 免费提供每日新注册域名列表:
-      https://whoisds.com/newly-registered-domains/{date}/nrd
-      日期格式: YYYY-MM-DD
+    whoisdownload.com 免费提供近 4 天的新注册域名列表（约 7 万/天）:
+      https://www.whoisdownload.com/download-panel/free-download-file/{base64(日期.zip)}/nrd/home
 
-    ZIP 里包含一个 .txt 文件，每行一个域名。
-    数据通常在次日凌晨可用，所以默认拉昨天的。
+    ZIP 里包含 domain-names.txt，每行一个域名。
+    数据通常在次日可用，所以默认拉昨天的。
     """
     import zipfile
     import io
+    import base64
 
     if not date_str:
-        # 默认拉昨天的数据（WhoisDS 当天数据通常还没生成）
         yesterday = datetime.now(BEIJING_TZ) - timedelta(days=1)
         date_str = yesterday.strftime("%Y-%m-%d")
 
-    # WhoisDS 的 URL 需要 base64 编码的日期
-    import base64
-    date_b64 = base64.b64encode(date_str.encode()).decode()
-    url = f"https://whoisds.com//whois-database/newly-registered-domains/{date_b64}.zip/nrd"
+    # whoisdownload.com 的格式：base64("YYYY-MM-DD.zip")
+    date_zip = f"{date_str}.zip"
+    date_b64 = base64.b64encode(date_zip.encode()).decode()
+    url = f"https://www.whoisdownload.com/download-panel/free-download-file/{date_b64}/nrd/home"
 
-    print(f"  📡 从 WhoisDS 下载 {date_str} 新注册域名...")
-    print(f"     URL: {url}")
+    print(f"  📡 下载 {date_str} 新注册域名...")
 
     resp = http_requests.get(url, timeout=120, headers={
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-        'Accept': 'application/zip, application/octet-stream, */*',
-        'Referer': 'https://whoisds.com/newly-registered-domains',
+        'Referer': 'https://www.whoisdownload.com/newly-registered-domains',
     }, allow_redirects=True)
 
     if resp.status_code != 200:
         raise Exception(f"HTTP {resp.status_code}")
 
-    content_type = resp.headers.get('Content-Type', '')
-
     # 检查是否返回了 ZIP
-    if b'PK' not in resp.content[:4] and 'zip' not in content_type.lower():
-        # 可能返回了 HTML 页面（数据还没准备好）
-        if b'<html' in resp.content[:200].lower():
-            raise Exception(f"{date_str} 的数据暂未发布，WhoisDS 返回了 HTML 页面")
-        raise Exception(f"返回非 ZIP 内容 (Content-Type: {content_type})")
+    if resp.content[:4] != b'PK\x03\x04':
+        if len(resp.content) == 0:
+            raise Exception(f"{date_str} 的数据暂未发布（返回为空）")
+        raise Exception(f"{date_str} 的数据暂未发布，请尝试更早的日期")
 
     # 解压
     zf = zipfile.ZipFile(io.BytesIO(resp.content))
     domains = []
     for name in zf.namelist():
-        if name.endswith('.txt') or name.endswith('.csv'):
-            text = zf.read(name).decode('utf-8', errors='ignore')
-            for line in text.splitlines():
-                d = line.strip()
-                if d and not d.startswith('#'):
-                    domains.append(d)
+        text = zf.read(name).decode('utf-8', errors='ignore')
+        for line in text.splitlines():
+            d = line.strip()
+            if d and not d.startswith('#'):
+                domains.append(d)
 
     print(f"  ✅ 下载完成: {len(domains)} 个域名（{date_str}）")
 
     # 保存原始备份
     DOMAIN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    backup = DOMAIN_CACHE_DIR / f"whoisds_{date_str}.txt"
+    backup = DOMAIN_CACHE_DIR / f"nrd_{date_str}.txt"
     backup.write_text("\n".join(domains), encoding="utf-8")
     print(f"  💾 备份: {backup}")
 
