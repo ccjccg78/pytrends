@@ -2155,11 +2155,30 @@ with tab6:
                                 time.sleep(wait)
                                 pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
                             elif '400' in err_str:
-                                # 400 = 关键词无效，跳过这批
-                                status_area.warning(f"⚠️ 关键词无效，跳过: {', '.join(batch[:3])}")
-                                for kw in batch:
-                                    if kw not in trends_data:
-                                        trends_data[kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": []}
+                                # 400 = 批次中有无效关键词，逐个重试
+                                for single_kw in batch:
+                                    if single_kw in trends_data:
+                                        continue
+                                    try:
+                                        pytrend.build_payload(kw_list=[single_kw], timeframe=trends_timeframe[1], geo='')
+                                        iot2 = pytrend.interest_over_time()
+                                        if not iot2.empty and single_kw in iot2.columns:
+                                            s = iot2[single_kw].values.astype(float)
+                                            a, m = np.mean(s), np.max(s)
+                                            if len(s) >= 3:
+                                                sp = max(1, len(s) // 3)
+                                                e_val, l_val = np.mean(s[:sp]), np.mean(s[sp:])
+                                                g = ((l_val - e_val) / e_val * 100) if e_val > 0 else (999 if l_val > 0 else 0)
+                                            else:
+                                                e_val, l_val, g = 0, 0, 0
+                                            trends_data[single_kw] = {"has_trend": a > 0, "avg": round(a, 1), "max": round(m, 1),
+                                                                       "growth": round(g, 1), "trend": s.tolist(),
+                                                                       "early": round(e_val, 1), "late": round(l_val, 1)}
+                                        else:
+                                            trends_data[single_kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": [], "early": 0, "late": 0}
+                                        time.sleep(random.uniform(3, 8))
+                                    except Exception:
+                                        trends_data[single_kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": [], "early": 0, "late": 0}
                                 break
                             else:
                                 status_area.warning(f"⚠️ 查询出错，跳过: {e}")
