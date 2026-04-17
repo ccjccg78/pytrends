@@ -47,6 +47,86 @@ from pytrends.exceptions import TooManyRequestsError, ResponseError
 # 北京时间
 BEIJING_TZ = timezone(timedelta(hours=8))
 
+# ── Google Trends 反限流工具 ────────────────────────────────────
+_USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15',
+    'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 Edg/124.0.0.0',
+]
+
+
+def _load_proxies(config):
+    """从 config.json 加载代理列表
+
+    支持格式:
+      "proxies": ["http://ip:port", "http://user:pass@ip:port", "socks5://ip:port"]
+    """
+    return config.get("proxies", [])
+
+
+def _create_pytrend(config, proxy_index=0):
+    """创建 TrendReq 实例，自动应用代理和随机 User-Agent
+
+    防护策略:
+      1. 代理轮换 — 如果配了 proxies 列表，自动轮换
+      2. User-Agent 随机 — 每次创建新实例用不同的 UA
+      3. 语言/时区随机 — 小幅度变化，模拟不同用户
+    """
+    proxies = _load_proxies(config)
+    ua = random.choice(_USER_AGENTS)
+
+    # 随机 hl 和 tz，模拟不同地区用户
+    hl_options = ['en-US', 'en-GB', 'en-AU', 'en-CA']
+    tz_options = [360, 300, 240, 0, -60, -480]
+    hl = random.choice(hl_options)
+    tz = random.choice(tz_options)
+
+    requests_args = {'headers': {'User-Agent': ua}}
+
+    if proxies:
+        # pytrends 原生支持代理列表轮换
+        return TrendReq(
+            hl=hl, tz=tz, timeout=(10, 30), retries=2, backoff_factor=1,
+            proxies=proxies, requests_args=requests_args,
+        )
+    else:
+        return TrendReq(
+            hl=hl, tz=tz, timeout=(10, 30), retries=2, backoff_factor=1,
+            requests_args=requests_args,
+        )
+
+
+def _smart_sleep(base_interval, batch_index, total_batches):
+    """智能等待：随机化间隔 + 定期长休息
+
+    策略:
+      - 基础间隔加 ±30% 随机抖动，避免固定节奏被识别
+      - 每 5 批休息 3-5 分钟
+      - 每 15 批休息 8-10 分钟（大休息）
+    """
+    if batch_index >= total_batches - 1:
+        return  # 最后一批不用等
+
+    if (batch_index + 1) % 15 == 0:
+        # 大休息
+        rest = random.uniform(8 * 60, 10 * 60)
+        print(f"    ⏸ 大休息 {rest/60:.1f} 分钟（已完成 {batch_index+1}/{total_batches}）...")
+        time.sleep(rest)
+    elif (batch_index + 1) % 5 == 0:
+        # 中休息
+        rest = random.uniform(3 * 60, 5 * 60)
+        print(f"    ⏸ 休息 {rest/60:.1f} 分钟（已完成 {batch_index+1}/{total_batches}）...")
+        time.sleep(rest)
+    else:
+        # 正常间隔 + 随机抖动
+        jitter = base_interval * random.uniform(-0.3, 0.3)
+        wait = base_interval + jitter + random.uniform(1, 5)
+        time.sleep(wait)
+
+
 # 所有采集地区
 ALL_REGIONS = [
     ("美国", "US"),
@@ -318,20 +398,31 @@ def fetch_rising_queries(config):
     timeframe = config.get("timeframe", "now 7-d")
     interval = config.get("request_interval", 50)
 
+    proxies = _load_proxies(config)
+    if proxies:
+        print(f"  🔀 已加载 {len(proxies)} 个代理")
+
     all_rising = []
     failed = []
     effective_interval = interval
+    consecutive_429 = 0
 
-    pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
+    pytrend = _create_pytrend(config)
 
     for i, kw in enumerate(kw_list):
         print(f"[{i+1}/{len(kw_list)}] 查询: {kw}")
+
+        # 每 10 个词轮换会话
+        if i > 0 and i % 10 == 0:
+            print(f"  🔄 轮换会话（新 Cookie + UA）")
+            pytrend = _create_pytrend(config, proxy_index=i)
 
         retry_count = 0
         while retry_count < 3:
             try:
                 pytrend.build_payload(kw_list=[kw], cat=cat, timeframe=timeframe, geo=geo)
                 result = pytrend.related_queries()
+                consecutive_429 = 0
 
                 if kw in result and result[kw]['rising'] is not None:
                     rising_df = result[kw]['rising'].copy()
@@ -342,51 +433,45 @@ def fetch_rising_queries(config):
                     print(f"  -> 无上升词")
                 break
 
-            except TooManyRequestsError:
+            except (TooManyRequestsError, ResponseError, Exception) as e:
+                is_429 = isinstance(e, TooManyRequestsError) or '429' in str(e)
+                if not is_429:
+                    if isinstance(e, ResponseError):
+                        retry_count += 1
+                        wait = 30 + retry_count * 15
+                        print(f"  ⚠️ 错误: {e}，等待 {wait}s ({retry_count}/3)")
+                        time.sleep(wait)
+                    else:
+                        print(f"  ❌ 失败: {e}")
+                        failed.append(kw)
+                        break
+                    continue
+
                 retry_count += 1
-                wait = 60 + retry_count * 60 + random.randint(0, 10)
-                old_interval = effective_interval
+                consecutive_429 += 1
+
+                # 指数退避
+                base_wait = min(60 * (2 ** (retry_count - 1)), 600)
+                extra_wait = min(consecutive_429 * 30, 300)
+                wait = base_wait + extra_wait + random.randint(0, 30)
+
                 effective_interval = min(effective_interval * 1.5, 300)
-                print(f"  ⚠️ 429 限流，等待 {wait}s 后重试 ({retry_count}/3)，后续间隔 {old_interval:.0f}s → {effective_interval:.0f}s")
+                print(f"  ⚠️ 429 限流，等待 {wait}s ({retry_count}/3)，连续429: {consecutive_429}，后续间隔→{effective_interval:.0f}s")
                 time.sleep(wait)
-                pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
+                pytrend = _create_pytrend(config, proxy_index=i + retry_count)
 
-            except ResponseError as e:
-                retry_count += 1
-                if '429' in str(e):
-                    wait = 60 + retry_count * 60 + random.randint(0, 10)
-                    old_interval = effective_interval
-                    effective_interval = min(effective_interval * 1.5, 300)
-                    print(f"  ⚠️ 429 限流，等待 {wait}s 后重试 ({retry_count}/3)，后续间隔 {old_interval:.0f}s → {effective_interval:.0f}s")
-                else:
-                    wait = 30 + retry_count * 15
-                    print(f"  ⚠️ 错误: {e}，等待 {wait}s ({retry_count}/3)")
-                time.sleep(wait)
-
-            except Exception as e:
-                if '429' in str(e):
-                    retry_count += 1
-                    wait = 60 + retry_count * 60 + random.randint(0, 10)
-                    old_interval = effective_interval
-                    effective_interval = min(effective_interval * 1.5, 300)
-                    print(f"  ⚠️ 429 限流，等待 {wait}s 后重试 ({retry_count}/3)，后续间隔 {old_interval:.0f}s → {effective_interval:.0f}s")
-                    time.sleep(wait)
-                    pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
-                else:
-                    print(f"  ❌ 失败: {e}")
-                    failed.append(kw)
-                    break
+                # 连续 5 次 429，长时间冷却
+                if consecutive_429 >= 5:
+                    cooldown = random.uniform(10 * 60, 15 * 60)
+                    print(f"    🧊 连续 {consecutive_429} 次 429，冷却 {cooldown/60:.0f} 分钟...")
+                    time.sleep(cooldown)
+                    consecutive_429 = 0
         else:
             failed.append(kw)
             print(f"  ❌ 重试耗尽，跳过")
 
         if i < len(kw_list) - 1:
-            # 每10个词休息2分钟，避免触发限流
-            if (i + 1) % 10 == 0:
-                print(f"  ⏸ 已完成 {i+1}/{len(kw_list)}，休息2分钟避免限流...")
-                time.sleep(2 * 60)
-            else:
-                time.sleep(effective_interval + random.uniform(0, 2))
+            _smart_sleep(effective_interval, i, len(kw_list))
 
     return all_rising, failed
 
@@ -415,7 +500,7 @@ def analyze_spikes(all_rising, config):
     interval = config.get("request_interval", 50)
     spike_results = {}
 
-    pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
+    pytrend = _create_pytrend(config)
     batches = [top_queries[i:i+5] for i in range(0, len(top_queries), 5)]
 
     for bi, batch in enumerate(batches):
@@ -449,6 +534,7 @@ def analyze_spikes(all_rising, config):
 
         except Exception as e:
             print(f"  验证失败: {e}")
+            pytrend = _create_pytrend(config, proxy_index=bi)
 
         if bi < len(batches) - 1:
             time.sleep(interval + random.uniform(0, 2))
@@ -1586,7 +1672,14 @@ def _fetch_domain_list(domain_config):
 
 
 def _trends_validate_domains(keywords, config):
-    """用 Google Trends 验证域名关键词，返回 {keyword: {has_trend, avg, max, growth, trend}}"""
+    """用 Google Trends 验证域名关键词，返回 {keyword: {has_trend, avg, max, growth, trend}}
+
+    防护策略:
+      1. 代理轮换 — 每次 429 后换代理 + 换 UA + 换 cookie
+      2. 智能等待 — 随机抖动 + 阶梯休息，避免固定节奏
+      3. 指数退避 — 429 后等待时间翻倍，最高 10 分钟
+      4. 会话轮换 — 每 10 批新建 TrendReq（新 cookie + 新 UA）
+    """
     domain_config = config.get("domain_mining", {})
     timeframe = domain_config.get("trends_timeframe", "today 15-d")
     interval = domain_config.get("trends_interval", 60)
@@ -1595,18 +1688,29 @@ def _trends_validate_domains(keywords, config):
     batches = [keywords[i:i+batch_size] for i in range(0, len(keywords), batch_size)]
     total_batches = len(batches)
     effective_interval = interval
+    consecutive_429 = 0  # 连续 429 计数
 
-    pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
+    proxies = _load_proxies(config)
+    if proxies:
+        print(f"  🔀 已加载 {len(proxies)} 个代理")
+
+    pytrend = _create_pytrend(config)
     trends_data = {}
 
     for bi, batch in enumerate(batches):
         print(f"  📈 Trends [{bi+1}/{total_batches}]: {', '.join(batch[:3])}{'...' if len(batch)>3 else ''}")
+
+        # 每 10 批轮换会话（新 cookie + 新 UA），降低被识别风险
+        if bi > 0 and bi % 10 == 0:
+            print(f"    🔄 轮换会话（新 Cookie + UA）")
+            pytrend = _create_pytrend(config, proxy_index=bi)
 
         retry_count = 0
         while retry_count < 3:
             try:
                 pytrend.build_payload(kw_list=batch, timeframe=timeframe, geo='')
                 iot = pytrend.interest_over_time()
+                consecutive_429 = 0  # 成功了，重置连续 429 计数
 
                 if not iot.empty:
                     for kw in batch:
@@ -1640,34 +1744,41 @@ def _trends_validate_domains(keywords, config):
                         trends_data[kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": []}
                 break
 
-            except TooManyRequestsError:
-                retry_count += 1
-                wait = 60 + retry_count * 60 + random.randint(0, 10)
-                effective_interval = min(effective_interval * 1.5, 300)
-                print(f"    ⚠️ 429 限流，等待 {wait}s ({retry_count}/3)，后续间隔→{effective_interval:.0f}s")
-                time.sleep(wait)
-                pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
-            except Exception as e:
-                if '429' in str(e):
-                    retry_count += 1
-                    wait = 60 + retry_count * 60 + random.randint(0, 10)
-                    effective_interval = min(effective_interval * 1.5, 300)
-                    print(f"    ⚠️ 429 限流，等待 {wait}s ({retry_count}/3)")
-                    time.sleep(wait)
-                    pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
-                else:
+            except (TooManyRequestsError, Exception) as e:
+                is_429 = isinstance(e, TooManyRequestsError) or '429' in str(e)
+                if not is_429:
                     print(f"    ❌ 查询失败: {e}")
                     for kw in batch:
                         if kw not in trends_data:
                             trends_data[kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": []}
                     break
 
-        if bi < total_batches - 1:
-            if (bi + 1) % 5 == 0:
-                print(f"    ⏸ 已完成 {bi+1}/{total_batches} 批，休息3分钟...")
-                time.sleep(3 * 60)
-            else:
-                time.sleep(effective_interval + random.uniform(0, 3))
+                retry_count += 1
+                consecutive_429 += 1
+
+                # 指数退避: 60s → 120s → 240s，连续多次 429 则更长
+                base_wait = min(60 * (2 ** (retry_count - 1)), 600)
+                extra_wait = min(consecutive_429 * 30, 300)  # 连续 429 额外惩罚
+                wait = base_wait + extra_wait + random.randint(0, 30)
+
+                print(f"    ⚠️ 429 限流，等待 {wait}s ({retry_count}/3)，连续429次数: {consecutive_429}")
+
+                # 提升后续基础间隔
+                effective_interval = min(effective_interval * 1.5, 300)
+
+                time.sleep(wait)
+                # 换新会话（新 Cookie + 新 UA + 可能换代理）
+                pytrend = _create_pytrend(config, proxy_index=bi + retry_count)
+
+                # 连续 5 次 429，长时间冷却
+                if consecutive_429 >= 5:
+                    cooldown = random.uniform(10 * 60, 15 * 60)
+                    print(f"    🧊 连续 {consecutive_429} 次 429，冷却 {cooldown/60:.0f} 分钟...")
+                    time.sleep(cooldown)
+                    consecutive_429 = 0
+
+        # 智能等待
+        _smart_sleep(effective_interval, bi, total_batches)
 
     return trends_data
 

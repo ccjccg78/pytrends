@@ -39,6 +39,8 @@
         "mini game", "HTML5 game", "online game free"
     ],
 
+    "proxies": [],
+
     "geo": "",
     "category": 0,
     "timeframe": "now 7-d",
