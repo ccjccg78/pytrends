@@ -1691,8 +1691,8 @@ with tab6:
         if _HAS_WORDNINJA:
             all_words = wordninja.split(clean)
         else:
-            return [clean], 1.0 if len(clean) >= 3 else 0.0
-        good_words = [w for w in all_words if len(w) >= 3]
+            return [clean], 1.0 if len(clean) >= 4 else 0.0
+        good_words = [w for w in all_words if len(w) >= 4]
         good_chars = sum(len(w) for w in good_words)
         quality = good_chars / len(clean) if clean else 0.0
         return good_words, quality
@@ -1707,14 +1707,17 @@ with tab6:
         good_words, quality = split_domain_words(body)
         if not good_words:
             return True
-        if quality < 0.5:
+        if quality < 0.7:
+            return True
+        # 至少要有一个 >= 5 字符的真实单词
+        if not any(len(w) >= 5 for w in good_words):
             return True
         return False
 
     def get_trends_keyword(body):
         """从域名主体提取 Trends 搜索关键词（拆词后空格连接）"""
         good_words, quality = split_domain_words(body)
-        if good_words and quality >= 0.5:
+        if good_words and quality >= 0.7:
             return " ".join(good_words)
         return body
 

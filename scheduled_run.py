@@ -1487,10 +1487,10 @@ def _split_domain_words(body):
         all_words = wordninja.split(clean)
     else:
         # 降级：不拆词，返回整体
-        return [clean], 1.0 if len(clean) >= 3 else 0.0
+        return [clean], 1.0 if len(clean) >= 4 else 0.0
 
-    # 有效单词：长度 >= 3
-    good_words = [w for w in all_words if len(w) >= 3]
+    # 有效单词：长度 >= 4
+    good_words = [w for w in all_words if len(w) >= 4]
     good_chars = sum(len(w) for w in good_words)
     quality = good_chars / len(clean) if clean else 0.0
 
@@ -1501,8 +1501,8 @@ def _is_random_string(body):
     """判断是否为随机字符串（结合 wordninja 拆词）
 
     策略:
-      1. wordninja 拆词，有效单词（>=3字符）覆盖率 < 50% → 随机串
-      2. 没有任何 >= 3 字符的单词 → 随机串
+      1. wordninja 拆词，有效单词（>=4字符）覆盖率 < 70% → 随机串
+      2. 没有任何 >= 5 字符的单词 → 随机串（太短的词组合没价值）
       3. 长度 > 25 且没有连字符 → 随机串
     """
     clean = body.replace("-", "")
@@ -1519,8 +1519,13 @@ def _is_random_string(body):
     if not good_words:
         return True  # 拆不出任何有效单词
 
-    if quality < 0.5:
+    if quality < 0.7:
         return True  # 有效单词覆盖率太低
+
+    # 至少要有一个 >= 5 字符的真实单词
+    has_real_word = any(len(w) >= 5 for w in good_words)
+    if not has_real_word:
+        return True
 
     return False
 
@@ -1535,7 +1540,7 @@ def _get_trends_keyword(body):
     """
     good_words, quality = _split_domain_words(body)
 
-    if good_words and quality >= 0.5:
+    if good_words and quality >= 0.7:
         return " ".join(good_words)
     return body  # 降级用原始域名主体
 
