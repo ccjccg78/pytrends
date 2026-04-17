@@ -1459,32 +1459,85 @@ def _extract_domain_body(domain):
     return d
 
 
+try:
+    import wordninja
+    _HAS_WORDNINJA = True
+except ImportError:
+    _HAS_WORDNINJA = False
+    print("⚠️ wordninja 未安装，使用基础随机串判断。建议: pip install wordninja")
+
+
+def _split_domain_words(body):
+    """用 wordninja 拆分域名主体为单词列表
+
+    返回 (words, quality_score):
+      words: 拆分出的有效单词列表（长度>=3）
+      quality_score: 有效单词字符占总长度的比例 (0~1)
+
+    示例:
+      smartfinance  → (['smart', 'finance'], 1.0)
+      xkjqmzw       → ([], 0.0)
+      coolappdesign → (['cool', 'app', 'design'], 1.0)
+    """
+    clean = body.replace("-", "")
+    if not clean:
+        return [], 0.0
+
+    if _HAS_WORDNINJA:
+        all_words = wordninja.split(clean)
+    else:
+        # 降级：不拆词，返回整体
+        return [clean], 1.0 if len(clean) >= 3 else 0.0
+
+    # 有效单词：长度 >= 3
+    good_words = [w for w in all_words if len(w) >= 3]
+    good_chars = sum(len(w) for w in good_words)
+    quality = good_chars / len(clean) if clean else 0.0
+
+    return good_words, quality
+
+
 def _is_random_string(body):
-    """判断是否为随机字符串"""
+    """判断是否为随机字符串（结合 wordninja 拆词）
+
+    策略:
+      1. wordninja 拆词，有效单词（>=3字符）覆盖率 < 50% → 随机串
+      2. 没有任何 >= 3 字符的单词 → 随机串
+      3. 长度 > 25 且没有连字符 → 随机串
+    """
     clean = body.replace("-", "")
     if not clean:
         return True
+
+    # 长度 > 25 且没有连字符，大概率垃圾
     if len(clean) > 25 and "-" not in body:
         return True
-    vowels = set("aeiou")
-    consonant_run = 0
-    for ch in clean:
-        if ch.isalpha() and ch not in vowels:
-            consonant_run += 1
-            if consonant_run >= 6:
-                return True
-        else:
-            consonant_run = 0
-    digit_count = sum(1 for c in clean if c.isdigit())
-    if len(clean) > 0 and digit_count / len(clean) > 0.4:
-        return True
-    if len(clean) > 8:
-        alpha_chars = [c for c in clean if c.isalpha()]
-        if alpha_chars:
-            consonants = sum(1 for c in alpha_chars if c not in vowels)
-            if consonants / len(alpha_chars) > 0.85:
-                return True
+
+    # wordninja 拆词判断
+    good_words, quality = _split_domain_words(body)
+
+    if not good_words:
+        return True  # 拆不出任何有效单词
+
+    if quality < 0.5:
+        return True  # 有效单词覆盖率太低
+
     return False
+
+
+def _get_trends_keyword(body):
+    """从域名主体提取 Google Trends 搜索关键词
+
+    用拆词结果生成更好的搜索词:
+      smartfinance  → "smart finance"
+      coolappdesign → "cool app design"
+      myai          → "myai"（太短就用原始值）
+    """
+    good_words, quality = _split_domain_words(body)
+
+    if good_words and quality >= 0.5:
+        return " ".join(good_words)
+    return body  # 降级用原始域名主体
 
 
 def _filter_domains(domains):
@@ -1806,18 +1859,26 @@ def fetch_and_filter_domains(config):
         print("❌ 过滤后无有效域名")
         return [], [], stats
 
-    # Step 3: Trends 验证
+    # Step 3: Trends 验证（用拆词后的关键词查询）
     max_trends = domain_config.get("max_trends_check", 200)
     to_check = filtered[:max_trends]
-    keywords = list(dict.fromkeys([_extract_domain_body(d) for d in to_check]))  # 去重保序
+
+    # 构建域名→搜索关键词映射（拆词后用空格连接）
+    domain_kw_map = {}  # {domain: trends_keyword}
+    for d in to_check:
+        body = _extract_domain_body(d)
+        domain_kw_map[d] = _get_trends_keyword(body)
+
+    keywords = list(dict.fromkeys(domain_kw_map.values()))  # 去重保序
     print(f"\n📈 Google Trends 验证（{len(keywords)} 个关键词）...")
+    print(f"  示例: {list(domain_kw_map.items())[:5]}")
     trends_data = _trends_validate_domains(keywords, config)
 
     # 分类结果
     growing = []
     has_volume = []
     for domain in to_check:
-        kw = _extract_domain_body(domain)
+        kw = domain_kw_map[domain]
         info = trends_data.get(kw, {})
         item = {"domain": domain, "keyword": kw, **info}
         if info.get("growth", 0) > 20:

@@ -1677,42 +1677,46 @@ with tab6:
                 return True
         return False
 
+    try:
+        import wordninja
+        _HAS_WORDNINJA = True
+    except ImportError:
+        _HAS_WORDNINJA = False
+
+    def split_domain_words(body):
+        """用 wordninja 拆分域名主体为单词"""
+        clean = body.replace("-", "")
+        if not clean:
+            return [], 0.0
+        if _HAS_WORDNINJA:
+            all_words = wordninja.split(clean)
+        else:
+            return [clean], 1.0 if len(clean) >= 3 else 0.0
+        good_words = [w for w in all_words if len(w) >= 3]
+        good_chars = sum(len(w) for w in good_words)
+        quality = good_chars / len(clean) if clean else 0.0
+        return good_words, quality
+
     def is_random_string(body):
-        """判断是否为随机字符串"""
-        # 去掉连字符
+        """用 wordninja 拆词判断是否为随机字符串"""
         clean = body.replace("-", "")
         if not clean:
             return True
-
-        # 1. 长度 > 25 且没有连字符
         if len(clean) > 25 and "-" not in body:
             return True
-
-        # 2. 连续辅音 >= 6
-        vowels = set("aeiou")
-        consonant_run = 0
-        for ch in clean:
-            if ch.isalpha() and ch not in vowels:
-                consonant_run += 1
-                if consonant_run >= 6:
-                    return True
-            else:
-                consonant_run = 0
-
-        # 3. 数字占比 > 40%
-        digit_count = sum(1 for c in clean if c.isdigit())
-        if len(clean) > 0 and digit_count / len(clean) > 0.4:
+        good_words, quality = split_domain_words(body)
+        if not good_words:
             return True
-
-        # 4. 字母数字混杂且无明显单词（长度>8且辅音占比超高）
-        if len(clean) > 8:
-            alpha_chars = [c for c in clean if c.isalpha()]
-            if alpha_chars:
-                consonants = sum(1 for c in alpha_chars if c not in vowels)
-                if consonants / len(alpha_chars) > 0.85:
-                    return True
-
+        if quality < 0.5:
+            return True
         return False
+
+    def get_trends_keyword(body):
+        """从域名主体提取 Trends 搜索关键词（拆词后空格连接）"""
+        good_words, quality = split_domain_words(body)
+        if good_words and quality >= 0.5:
+            return " ".join(good_words)
+        return body
 
     def filter_domains(domains_text):
         """完整的域名过滤流水线"""
@@ -1945,6 +1949,7 @@ with tab6:
                 domain_df = pd.DataFrame({
                     "域名": final_domains,
                     "主体": [extract_domain_body(d) for d in final_domains],
+                    "拆词": [get_trends_keyword(extract_domain_body(d)) for d in final_domains],
                     "后缀": ["." + d.rsplit(".", 1)[-1] if "." in d else "" for d in final_domains],
                 })
                 st.dataframe(domain_df, use_container_width=True, hide_index=True, height=300)
@@ -1966,12 +1971,16 @@ with tab6:
             st.subheader("📈 Google Trends 二次验证")
             st.caption(f"对 {len(final_domains)} 个域名关键词查询 Google Trends {trends_timeframe[0]}趋势")
 
-            # 提取域名主体作为搜索关键词
-            keywords = [extract_domain_body(d) for d in final_domains]
+            # 提取域名主体，用拆词后的关键词查 Trends
+            domain_kw_map = {}  # {domain: trends_keyword}
+            for d in final_domains:
+                body = extract_domain_body(d)
+                domain_kw_map[d] = get_trends_keyword(body)
+
             # 去重
             seen_kw = set()
             unique_keywords = []
-            for kw in keywords:
+            for kw in domain_kw_map.values():
                 if kw not in seen_kw:
                     unique_keywords.append(kw)
                     seen_kw.add(kw)
@@ -2075,7 +2084,7 @@ with tab6:
             no_volume_domains = []
 
             for domain in final_domains:
-                kw = extract_domain_body(domain)
+                kw = domain_kw_map.get(domain, extract_domain_body(domain))
                 info = trends_data.get(kw, {})
                 if info.get("growth", 0) > 20:
                     growing_domains.append({"domain": domain, "keyword": kw, **info})
