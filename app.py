@@ -2011,225 +2011,254 @@ with tab6:
         # Step 2: Google Trends 验证
         if start_full and trends_enabled and final_domains:
             st.divider()
-            st.subheader("📈 Google Trends 二次验证")
-            st.caption(f"对 {len(final_domains)} 个域名关键词查询 Google Trends {trends_timeframe[0]}趋势")
+            st.subheader("📈 Google Trends 分批验证")
 
-            # 提取域名主体，用拆词后的关键词查 Trends
-            domain_kw_map = {}  # {domain: trends_keyword}
+            # 构建域名→关键词映射
+            domain_kw_map = {}
             for d in final_domains:
                 body = extract_domain_body(d)
                 domain_kw_map[d] = get_trends_keyword(body)
 
-            # 去重
+            # 去重关键词
             seen_kw = set()
             unique_keywords = []
-            for kw in domain_kw_map.values():
+            kw_to_domains = {}  # 关键词→域名列表
+            for d, kw in domain_kw_map.items():
                 if kw not in seen_kw:
                     unique_keywords.append(kw)
                     seen_kw.add(kw)
+                    kw_to_domains[kw] = []
+                kw_to_domains[kw].append(d)
 
-            batches = [unique_keywords[i:i+trends_batch_size]
-                       for i in range(0, len(unique_keywords), trends_batch_size)]
-            total_batches = len(batches)
+            # 分成每轮 50 个关键词（10批×5个）
+            ROUND_SIZE = 50
+            rounds = [unique_keywords[i:i+ROUND_SIZE] for i in range(0, len(unique_keywords), ROUND_SIZE)]
+            total_rounds = len(rounds)
+            total_kw = len(unique_keywords)
 
-            progress = st.progress(0, text="准备查询 Google Trends...")
+            st.info(f"共 **{total_kw}** 个关键词，分 **{total_rounds}** 轮查询（每轮 {ROUND_SIZE} 个），每轮完成后即时推送飞书")
+
+            # 停止按钮
+            if "domain_stop" not in st.session_state:
+                st.session_state.domain_stop = False
+            stop_btn = st.button("⏹ 停止验证（推送已有结果）", key="stop_trends", type="secondary")
+            if stop_btn:
+                st.session_state.domain_stop = True
+
+            progress = st.progress(0, text="准备开始...")
             status_area = st.empty()
+            results_area = st.empty()
             effective_interval = trends_interval
 
             pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
 
-            trends_data = {}  # {keyword: {"has_trend": bool, "avg": float, "max": float, "trend": list, "growth": float}}
+            all_growing = []
+            all_has_volume = []
+            all_no_volume = []
+            trends_data = {}
+            stopped = False
 
-            for bi, batch in enumerate(batches):
-                progress.progress(bi / total_batches,
-                                   text=f"查询 Trends: {', '.join(batch[:3])}{'...' if len(batch)>3 else ''} ({bi+1}/{total_batches})")
+            def _send_round_feishu(growing_items, round_idx, total_r, checked_count, total_count):
+                """每轮完成后即时推送飞书"""
+                notify = load_notify_config()
+                webhook = notify.get("feishu_webhook", "")
+                if not webhook or not growing_items:
+                    return
+                now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+                content_lines = [
+                    [{"tag": "text", "text": f"📅 {now}\n第 {round_idx}/{total_r} 轮完成（已查 {checked_count}/{total_count}），本轮发现 {len(growing_items)} 个增长域名"}],
+                ]
+                for item in growing_items[:20]:
+                    growth_str = f"+{item['growth']:.0f}%" if item.get('growth', 0) < 999 else "新词飙升"
+                    content_lines.append([{"tag": "text",
+                                            "text": f"  {item['domain']}  ({growth_str}, 均值{item.get('avg', 0)})"}])
+                payload = {
+                    "msg_type": "post",
+                    "content": {"post": {"zh_cn": {
+                        "title": f"🌐 域名淘金 第{round_idx}轮",
+                        "content": content_lines,
+                    }}}
+                }
+                try:
+                    http_requests.post(webhook, json=payload, timeout=10)
+                except Exception:
+                    pass
 
-                retry_count = 0
-                while retry_count < 3:
-                    try:
-                        pytrend.build_payload(kw_list=batch, timeframe=trends_timeframe[1], geo='')
-                        iot = pytrend.interest_over_time()
+            for ri, round_keywords in enumerate(rounds):
+                if st.session_state.get("domain_stop", False):
+                    stopped = True
+                    status_area.warning(f"⏹ 已手动停止，共完成 {ri}/{total_rounds} 轮")
+                    break
 
-                        if not iot.empty:
-                            for kw in batch:
-                                if kw in iot.columns:
-                                    series = iot[kw].values.astype(float)
-                                    avg_val = np.mean(series)
-                                    max_val = np.max(series)
+                round_num = ri + 1
+                progress.progress(ri / total_rounds, text=f"第 {round_num}/{total_rounds} 轮...")
 
-                                    # 计算增长趋势：后1/3 vs 前1/3
-                                    if len(series) >= 3:
-                                        split = max(1, len(series) // 3)
-                                        early = np.mean(series[:split])
-                                        late = np.mean(series[-split:])
-                                        if early > 0:
-                                            growth = (late - early) / early * 100
-                                        elif late > 0:
-                                            growth = 999  # 从0增长
+                # 每轮内分成 5 个一批
+                round_batches = [round_keywords[i:i+trends_batch_size]
+                                 for i in range(0, len(round_keywords), trends_batch_size)]
+                round_growing = []
+
+                for bi, batch in enumerate(round_batches):
+                    status_area.info(f"第 {round_num}/{total_rounds} 轮 — 批次 {bi+1}/{len(round_batches)}: {', '.join(batch[:3])}{'...' if len(batch)>3 else ''}")
+
+                    retry_count = 0
+                    while retry_count < 3:
+                        try:
+                            pytrend.build_payload(kw_list=batch, timeframe=trends_timeframe[1], geo='')
+                            iot = pytrend.interest_over_time()
+
+                            if not iot.empty:
+                                for kw in batch:
+                                    if kw in iot.columns:
+                                        series = iot[kw].values.astype(float)
+                                        avg_val = np.mean(series)
+                                        max_val = np.max(series)
+                                        if len(series) >= 3:
+                                            split = max(1, len(series) // 3)
+                                            early = np.mean(series[:split])
+                                            late = np.mean(series[-split:])
+                                            growth = ((late - early) / early * 100) if early > 0 else (999 if late > 0 else 0)
                                         else:
                                             growth = 0
+                                        trends_data[kw] = {
+                                            "has_trend": avg_val > 0,
+                                            "avg": round(avg_val, 1), "max": round(max_val, 1),
+                                            "growth": round(growth, 1), "trend": series.tolist(),
+                                        }
                                     else:
-                                        growth = 0
-
-                                    has_trend = avg_val > 0
-                                    trends_data[kw] = {
-                                        "has_trend": has_trend,
-                                        "avg": round(avg_val, 1),
-                                        "max": round(max_val, 1),
-                                        "growth": round(growth, 1),
-                                        "trend": series.tolist(),
-                                    }
-                                else:
+                                        trends_data[kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": []}
+                            else:
+                                for kw in batch:
                                     trends_data[kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": []}
-                        else:
-                            for kw in batch:
-                                trends_data[kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": []}
-                        break
-
-                    except TooManyRequestsError:
-                        retry_count += 1
-                        wait = 60 + retry_count * 60 + random.randint(0, 10)
-                        effective_interval = min(effective_interval * 1.5, 300)
-                        status_area.warning(f"⚠️ 触发限流，等待 {wait}s 后重试 ({retry_count}/3)，后续间隔→{effective_interval:.0f}s")
-                        time.sleep(wait)
-                        pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
-                    except Exception as e:
-                        if '429' in str(e):
+                            break
+                        except TooManyRequestsError:
                             retry_count += 1
                             wait = 60 + retry_count * 60 + random.randint(0, 10)
                             effective_interval = min(effective_interval * 1.5, 300)
-                            status_area.warning(f"⚠️ 触发限流，等待 {wait}s 后重试 ({retry_count}/3)")
+                            status_area.warning(f"⚠️ 429 限流，等待 {wait}s ({retry_count}/3)")
                             time.sleep(wait)
                             pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
-                        else:
-                            status_area.error(f"❌ 查询失败: {e}")
-                            for kw in batch:
-                                if kw not in trends_data:
-                                    trends_data[kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": []}
-                            break
+                        except Exception as e:
+                            if '429' in str(e):
+                                retry_count += 1
+                                wait = 60 + retry_count * 60 + random.randint(0, 10)
+                                effective_interval = min(effective_interval * 1.5, 300)
+                                status_area.warning(f"⚠️ 429 限流，等待 {wait}s ({retry_count}/3)")
+                                time.sleep(wait)
+                                pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
+                            else:
+                                status_area.error(f"❌ 查询失败: {e}")
+                                for kw in batch:
+                                    if kw not in trends_data:
+                                        trends_data[kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": []}
+                                break
 
-                if bi < total_batches - 1:
-                    # 每5批多休息一会
-                    if (bi + 1) % 5 == 0:
-                        rest = 3 * 60
-                        status_area.info(f"⏸ 已完成 {bi+1}/{total_batches} 批，休息 3 分钟避免限流...")
-                        time.sleep(rest)
-                        status_area.empty()
-                    else:
+                    if bi < len(round_batches) - 1:
                         time.sleep(effective_interval + random.uniform(0, 3))
 
-            progress.progress(1.0, text="Trends 验证完成！")
+                # 本轮结果汇总
+                for kw in round_keywords:
+                    info = trends_data.get(kw, {})
+                    for domain in kw_to_domains.get(kw, []):
+                        item = {"domain": domain, "keyword": kw, **info}
+                        if info.get("growth", 0) > 20:
+                            round_growing.append(item)
+                            all_growing.append(item)
+                        elif info.get("has_trend", False):
+                            all_has_volume.append(item)
+                        else:
+                            all_no_volume.append(item)
+
+                checked = min((ri + 1) * ROUND_SIZE, total_kw)
+
+                # 即时推送本轮结果到飞书
+                _send_round_feishu(round_growing, round_num, total_rounds, checked, total_kw)
+                if round_growing:
+                    status_area.success(f"✅ 第 {round_num} 轮完成！发现 {len(round_growing)} 个增长域名，已推飞书")
+                else:
+                    status_area.info(f"第 {round_num} 轮完成，本轮无增长域名")
+
+                # 实时更新结果展示
+                with results_area.container():
+                    st.markdown(f"**已完成 {checked}/{total_kw}** — 🚀 增长 {len(all_growing)} / 📊 有量 {len(all_has_volume)} / ❌ 无量 {len(all_no_volume)}")
+                    if all_growing:
+                        gdf = pd.DataFrame(all_growing).sort_values("growth", ascending=False)
+                        st.dataframe(gdf[["domain", "keyword", "avg", "max", "growth"]].rename(
+                            columns={"domain": "域名", "keyword": "关键词", "avg": "均值", "max": "最高", "growth": "增长%"}
+                        ), use_container_width=True, hide_index=True)
+
+                # 轮间休息 2-3 分钟
+                if ri < total_rounds - 1 and not st.session_state.get("domain_stop", False):
+                    rest = random.uniform(2 * 60, 3 * 60)
+                    status_area.info(f"⏸ 轮间休息 {rest/60:.1f} 分钟...")
+                    time.sleep(rest)
+
+            # 最终结果
+            if not stopped:
+                progress.progress(1.0, text="Trends 验证完成！")
+            st.session_state.domain_stop = False
             status_area.empty()
 
-            # 汇总结果
-            growing_domains = []
-            has_volume_domains = []
-            no_volume_domains = []
+            st.divider()
+            st.subheader("📊 最终结果")
 
-            for domain in final_domains:
-                kw = domain_kw_map.get(domain, extract_domain_body(domain))
-                info = trends_data.get(kw, {})
-                if info.get("growth", 0) > 20:
-                    growing_domains.append({"domain": domain, "keyword": kw, **info})
-                elif info.get("has_trend", False):
-                    has_volume_domains.append({"domain": domain, "keyword": kw, **info})
-                else:
-                    no_volume_domains.append({"domain": domain, "keyword": kw, **info})
-
-            # 展示结果
             col_g, col_v, col_n = st.columns(3)
             with col_g:
-                st.metric("🚀 搜索量增长", len(growing_domains))
+                st.metric("🚀 搜索量增长", len(all_growing))
             with col_v:
-                st.metric("📊 有搜索量", len(has_volume_domains))
+                st.metric("📊 有搜索量", len(all_has_volume))
             with col_n:
-                st.metric("❌ 无搜索量", len(no_volume_domains))
+                st.metric("❌ 无搜索量", len(all_no_volume))
 
-            # 搜索量增长的域名（重点关注）
-            if growing_domains:
-                st.subheader("🚀 搜索量增长的域名（重点关注）")
-                growing_df = pd.DataFrame(growing_domains)
-                growing_df = growing_df.sort_values("growth", ascending=False)
+            if all_growing:
+                growing_df = pd.DataFrame(all_growing).sort_values("growth", ascending=False)
                 display_growing = growing_df[["domain", "keyword", "avg", "max", "growth"]].copy()
                 display_growing.columns = ["域名", "关键词", "平均搜索量", "最高搜索量", "增长率%"]
                 st.dataframe(display_growing, use_container_width=True, hide_index=True)
 
-                # 趋势曲线
-                st.markdown("**趋势曲线：**")
-                cols_per_row = 4
-                for row_start in range(0, min(len(growing_domains), 20), cols_per_row):
-                    cols = st.columns(cols_per_row)
-                    for ci, col in enumerate(cols):
-                        idx = row_start + ci
-                        if idx >= len(growing_domains) or idx >= 20:
-                            break
-                        item = growing_domains[idx]
-                        trend = item.get("trend", [])
-                        if not trend:
-                            continue
-                        with col:
-                            fig_mini = go.Figure()
-                            fig_mini.add_trace(go.Scatter(
-                                y=trend, mode='lines+markers',
-                                line=dict(color='#10b981', width=2),
-                                marker=dict(size=3), hoverinfo='y',
-                            ))
-                            fig_mini.update_layout(
-                                title=dict(text=f"📈 {item['keyword'][:20]}", font=dict(size=12)),
-                                height=160, margin=dict(l=10, r=10, t=30, b=10),
-                                xaxis=dict(showticklabels=False, showgrid=False),
-                                yaxis=dict(showticklabels=False, showgrid=True, gridcolor='#f0f0f0'),
-                                plot_bgcolor='white',
-                            )
-                            st.plotly_chart(fig_mini, use_container_width=True)
-
-                # 下载
                 csv_data = display_growing.to_csv(index=False).encode('utf-8-sig')
                 st.download_button("📥 下载增长域名 CSV", csv_data, "growing_domains.csv", "text/csv",
                                     use_container_width=True)
 
-                # 飞书通知
-                if growing_domains:
-                    notify = load_notify_config()
-                    webhook = notify.get("feishu_webhook", "")
-                    if webhook:
-                        now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
-                        content_lines = [
-                            [{"tag": "text", "text": f"📅 {now}\n从 {filter_result['input_total']} 个新域名中筛选出 {len(final_domains)} 个，{len(growing_domains)} 个有搜索增长"}],
-                        ]
-                        for item in growing_domains[:30]:
-                            growth_str = f"+{item['growth']:.0f}%" if item['growth'] < 999 else "新词飙升"
-                            content_lines.append([{"tag": "text",
-                                                    "text": f"  {item['domain']}  ({growth_str}, 均值{item['avg']})"}])
-                        payload = {
-                            "msg_type": "post",
-                            "content": {"post": {"zh_cn": {
-                                "title": "🌐 域名淘金报告",
-                                "content": content_lines,
-                            }}}
-                        }
-                        try:
-                            feishu_resp = http_requests.post(webhook, json=payload, timeout=10)
-                            if feishu_resp.status_code == 200:
-                                st.success("✅ 飞书通知已发送")
-                        except Exception:
-                            pass
+                # 最终汇总飞书
+                notify = load_notify_config()
+                webhook = notify.get("feishu_webhook", "")
+                if webhook:
+                    now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+                    status_text = "已停止" if stopped else "全部完成"
+                    checked = len(all_growing) + len(all_has_volume) + len(all_no_volume)
+                    content_lines = [
+                        [{"tag": "text", "text": f"📅 {now}\n{status_text}！共查 {checked}/{total_kw} 个关键词\n🚀 {len(all_growing)} 个增长  📊 {len(all_has_volume)} 个有量"}],
+                    ]
+                    for item in all_growing[:30]:
+                        growth_str = f"+{item['growth']:.0f}%" if item.get('growth', 0) < 999 else "新词飙升"
+                        content_lines.append([{"tag": "text", "text": f"  {item['domain']}  ({growth_str}, 均值{item.get('avg', 0)})"}])
+                    payload = {
+                        "msg_type": "post",
+                        "content": {"post": {"zh_cn": {
+                            "title": "🌐 域名淘金 最终报告",
+                            "content": content_lines,
+                        }}}
+                    }
+                    try:
+                        feishu_resp = http_requests.post(webhook, json=payload, timeout=10)
+                        if feishu_resp.status_code == 200:
+                            st.success("✅ 最终报告已推飞书")
+                    except Exception:
+                        pass
 
-            # 有搜索量但未明显增长
-            if has_volume_domains:
-                with st.expander(f"📊 有搜索量但未明显增长（{len(has_volume_domains)} 个）"):
-                    vol_df = pd.DataFrame(has_volume_domains)
-                    vol_df = vol_df.sort_values("avg", ascending=False)
-                    display_vol = vol_df[["domain", "keyword", "avg", "max", "growth"]].copy()
-                    display_vol.columns = ["域名", "关键词", "平均搜索量", "最高搜索量", "增长率%"]
-                    st.dataframe(display_vol, use_container_width=True, hide_index=True)
+            if all_has_volume:
+                with st.expander(f"📊 有搜索量但未明显增长（{len(all_has_volume)} 个）"):
+                    vol_df = pd.DataFrame(all_has_volume).sort_values("avg", ascending=False)
+                    st.dataframe(vol_df[["domain", "keyword", "avg", "max", "growth"]].rename(
+                        columns={"domain": "域名", "keyword": "关键词", "avg": "均值", "max": "最高", "growth": "增长%"}
+                    ), use_container_width=True, hide_index=True)
 
-            # 无搜索量
-            if no_volume_domains:
-                with st.expander(f"❌ 无搜索量（{len(no_volume_domains)} 个）"):
-                    st.text("\n".join([d["domain"] for d in no_volume_domains[:200]]))
-                    if len(no_volume_domains) > 200:
-                        st.caption(f"...等共 {len(no_volume_domains)} 个")
+            if all_no_volume:
+                with st.expander(f"❌ 无搜索量（{len(all_no_volume)} 个）"):
+                    st.text("\n".join([d["domain"] for d in all_no_volume[:200]]))
+                    if len(all_no_volume) > 200:
+                        st.caption(f"...等共 {len(all_no_volume)} 个")
 
     elif (start_filter or start_full) and not domain_input.strip():
         st.error("请输入域名列表或上传文件")
