@@ -2019,11 +2019,14 @@ with tab6:
                 body = extract_domain_body(d)
                 domain_kw_map[d] = get_trends_keyword(body)
 
-            # 去重关键词
+            # 去重关键词 + 过滤无效关键词
             seen_kw = set()
             unique_keywords = []
             kw_to_domains = {}  # 关键词→域名列表
             for d, kw in domain_kw_map.items():
+                # 跳过无效关键词：空、纯符号、太长（>50字符）
+                if not kw or len(kw) > 50 or not re.search(r'[a-zA-Z]', kw):
+                    continue
                 if kw not in seen_kw:
                     unique_keywords.append(kw)
                     seen_kw.add(kw)
@@ -2139,15 +2142,23 @@ with tab6:
                             time.sleep(wait)
                             pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
                         except Exception as e:
-                            if '429' in str(e):
+                            err_str = str(e)
+                            if '429' in err_str:
                                 retry_count += 1
                                 wait = 60 + retry_count * 60 + random.randint(0, 10)
                                 effective_interval = min(effective_interval * 1.5, 300)
                                 status_area.warning(f"⚠️ 429 限流，等待 {wait}s ({retry_count}/3)")
                                 time.sleep(wait)
                                 pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
+                            elif '400' in err_str:
+                                # 400 = 关键词无效，跳过这批
+                                status_area.warning(f"⚠️ 关键词无效，跳过: {', '.join(batch[:3])}")
+                                for kw in batch:
+                                    if kw not in trends_data:
+                                        trends_data[kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": []}
+                                break
                             else:
-                                status_area.error(f"❌ 查询失败: {e}")
+                                status_area.warning(f"⚠️ 查询出错，跳过: {e}")
                                 for kw in batch:
                                     if kw not in trends_data:
                                         trends_data[kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": []}
