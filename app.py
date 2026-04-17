@@ -1826,7 +1826,10 @@ with tab6:
         # 从 session_state 读取已下载的数据
         domain_input = st.session_state.get("whoisds_domains", "")
         if domain_input:
-            st.info(f"已加载 {len(domain_input.strip().splitlines())} 个域名，可直接开始筛选")
+            count = len(domain_input.strip().splitlines())
+            st.info(f"已加载 {count} 个域名，可直接开始筛选")
+            st.download_button("📥 下载原始域名列表", domain_input.encode('utf-8'),
+                                f"nrd_{download_date.strftime('%Y-%m-%d')}.txt", "text/plain")
 
     elif input_method == "手动粘贴":
         domain_input = st.text_area(
