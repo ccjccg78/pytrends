@@ -318,7 +318,7 @@ with st.sidebar:
 # ════════════════════════════════════════════════════════════════
 # 主区域 - 标签页
 # ════════════════════════════════════════════════════════════════
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["🔍 爆增词追踪", "🔥 时下流行", "🗺 Sitemap 监控", "🐦 Twitter 监控", "🤖 AI 平台监控"])
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["🔍 爆增词追踪", "🔥 时下流行", "🗺 Sitemap 监控", "🐦 Twitter 监控", "🤖 AI 平台监控", "🌐 域名淘金"])
 
 # ════════════════════════════════════════════════════════════════
 # Tab 1: 爆增词追踪
@@ -1623,3 +1623,559 @@ with tab5:
                                         f"{item.get('comments', 0)} comments) [链接]({item['url']})")
         else:
             st.success("✅ 所有平台无新内容")
+
+
+# ════════════════════════════════════════════════════════════════
+# Tab 6: 域名淘金
+# ════════════════════════════════════════════════════════════════
+with tab6:
+    st.title("🌐 域名淘金")
+    st.caption("从新注册域名中筛选有价值的域名，通过 Google Trends 验证搜索量增长趋势")
+
+    # ── 垃圾行业词黑名单 ──
+    DOMAIN_BLACKLIST = [
+        # 成人类
+        "porn", "xxx", "sex", "sexy", "escort", "adult", "nude", "camgirl", "onlyfans",
+        # 博彩类
+        "casino", "bet", "bets", "betting", "poker", "slot", "slots", "gamble", "gambling", "lottery",
+        # 贷款/灰产类
+        "loan", "loans", "payday", "creditrepair", "cashadvance", "debt",
+        # 仿牌/低质电商类
+        "cheapnike", "cheapadidas", "replica", "fakebrand", "fakewatch", "discountbags",
+        # 加密空投垃圾类
+        "airdrop", "cryptoairdrop", "freecrypto", "claimtoken", "walletclaim",
+        # 停车页/域名交易类
+        "forsale", "buydomain", "premiumdomain", "domainmarket", "domainsale",
+    ]
+
+    def is_valid_tld(domain):
+        """只保留 .com 和 .ai 域名"""
+        domain_lower = domain.lower().strip()
+        return domain_lower.endswith(".com") or domain_lower.endswith(".ai")
+
+    def extract_domain_body(domain):
+        """提取域名主体部分（去掉 TLD）"""
+        domain_lower = domain.lower().strip()
+        if domain_lower.endswith(".com"):
+            return domain_lower[:-4]
+        elif domain_lower.endswith(".ai"):
+            return domain_lower[:-3]
+        return domain_lower
+
+    def has_digits(body):
+        """域名主体包含数字"""
+        return bool(re.search(r'\d', body))
+
+    def has_special_chars(body):
+        """域名主体包含特殊字符（连字符除外的非字母字符）"""
+        return bool(re.search(r'[^a-z\-]', body))
+
+    def contains_blacklist(body):
+        """域名主体命中垃圾词黑名单"""
+        for word in DOMAIN_BLACKLIST:
+            if word in body:
+                return True
+        return False
+
+    def is_random_string(body):
+        """判断是否为随机字符串"""
+        # 去掉连字符
+        clean = body.replace("-", "")
+        if not clean:
+            return True
+
+        # 1. 长度 > 25 且没有连字符
+        if len(clean) > 25 and "-" not in body:
+            return True
+
+        # 2. 连续辅音 >= 6
+        vowels = set("aeiou")
+        consonant_run = 0
+        for ch in clean:
+            if ch.isalpha() and ch not in vowels:
+                consonant_run += 1
+                if consonant_run >= 6:
+                    return True
+            else:
+                consonant_run = 0
+
+        # 3. 数字占比 > 40%
+        digit_count = sum(1 for c in clean if c.isdigit())
+        if len(clean) > 0 and digit_count / len(clean) > 0.4:
+            return True
+
+        # 4. 字母数字混杂且无明显单词（长度>8且辅音占比超高）
+        if len(clean) > 8:
+            alpha_chars = [c for c in clean if c.isalpha()]
+            if alpha_chars:
+                consonants = sum(1 for c in alpha_chars if c not in vowels)
+                if consonants / len(alpha_chars) > 0.85:
+                    return True
+
+        return False
+
+    def filter_domains(domains_text):
+        """完整的域名过滤流水线"""
+        lines = [line.strip() for line in domains_text.strip().splitlines() if line.strip()]
+
+        results = {
+            "input_total": len(lines),
+            "after_tld": [],
+            "after_digits": [],
+            "after_special": [],
+            "after_blacklist": [],
+            "after_random": [],
+            "filtered_out": {
+                "tld": [],
+                "digits": [],
+                "special": [],
+                "blacklist": [],
+                "random": [],
+            }
+        }
+
+        # Step 1: 只保留 .com / .ai
+        for d in lines:
+            if is_valid_tld(d):
+                results["after_tld"].append(d)
+            else:
+                results["filtered_out"]["tld"].append(d)
+
+        # Step 2: 过滤含数字的域名
+        for d in results["after_tld"]:
+            body = extract_domain_body(d)
+            if not has_digits(body):
+                results["after_digits"].append(d)
+            else:
+                results["filtered_out"]["digits"].append(d)
+
+        # Step 3: 过滤含特殊字符的域名
+        for d in results["after_digits"]:
+            body = extract_domain_body(d)
+            if not has_special_chars(body):
+                results["after_special"].append(d)
+            else:
+                results["filtered_out"]["special"].append(d)
+
+        # Step 4: 垃圾行业词过滤
+        for d in results["after_special"]:
+            body = extract_domain_body(d)
+            if not contains_blacklist(body):
+                results["after_blacklist"].append(d)
+            else:
+                results["filtered_out"]["blacklist"].append(d)
+
+        # Step 5: 随机字符串过滤
+        for d in results["after_blacklist"]:
+            body = extract_domain_body(d)
+            if not is_random_string(body):
+                results["after_random"].append(d)
+            else:
+                results["filtered_out"]["random"].append(d)
+
+        return results
+
+    # ── 输入区 ──
+    st.subheader("📥 获取新注册域名")
+
+    input_method = st.radio("数据来源", ["自动下载（WhoisDS 免费）", "手动粘贴", "上传文件"],
+                             horizontal=True, key="domain_source")
+
+    domain_input = ""
+
+    if input_method == "自动下载（WhoisDS 免费）":
+        st.caption("从 WhoisDS 自动下载昨日新注册域名列表（免费，每日更新，通常包含数十万域名）")
+        download_date = st.date_input("选择日期（默认昨天）",
+                                        value=datetime.now(BEIJING_TZ).date() - timedelta(days=1),
+                                        key="whoisds_date")
+        if st.button("📡 下载域名列表", key="download_whoisds"):
+            import zipfile
+            import io as _io
+            import base64
+
+            date_str = download_date.strftime("%Y-%m-%d")
+            date_b64 = base64.b64encode(date_str.encode()).decode()
+            url = f"https://whoisds.com/whois-database/newly-registered-domains/{date_b64}/nrd"
+
+            with st.spinner(f"正在下载 {date_str} 新注册域名..."):
+                try:
+                    resp = http_requests.get(url, timeout=120, headers={
+                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                        'Accept': 'application/zip, application/octet-stream, */*',
+                        'Referer': 'https://whoisds.com/newly-registered-domains',
+                    }, allow_redirects=True)
+
+                    if resp.status_code != 200:
+                        st.error(f"下载失败: HTTP {resp.status_code}")
+                    elif b'PK' not in resp.content[:4] and 'zip' not in resp.headers.get('Content-Type', '').lower():
+                        st.error(f"{date_str} 的数据暂未发布，请尝试更早的日期")
+                    else:
+                        zf = zipfile.ZipFile(_io.BytesIO(resp.content))
+                        domains_list = []
+                        for name in zf.namelist():
+                            if name.endswith('.txt') or name.endswith('.csv'):
+                                text = zf.read(name).decode('utf-8', errors='ignore')
+                                for line in text.splitlines():
+                                    d = line.strip()
+                                    if d and not d.startswith('#'):
+                                        domains_list.append(d)
+                        st.session_state["whoisds_domains"] = "\n".join(domains_list)
+                        st.success(f"✅ 下载完成: {len(domains_list)} 个域名（{date_str}）")
+                except Exception as e:
+                    st.error(f"下载失败: {e}")
+
+        # 从 session_state 读取已下载的数据
+        domain_input = st.session_state.get("whoisds_domains", "")
+        if domain_input:
+            st.info(f"已加载 {len(domain_input.strip().splitlines())} 个域名，可直接开始筛选")
+
+    elif input_method == "手动粘贴":
+        domain_input = st.text_area(
+            "域名列表（每行一个）",
+            height=200,
+            placeholder="example.com\ncoolapp.ai\ntest123.net\nxyzrandomstring.com\n...",
+            key="domain_input"
+        )
+
+    elif input_method == "上传文件":
+        uploaded_file = st.file_uploader("上传 TXT/CSV 文件", type=["txt", "csv"], key="domain_file")
+        if uploaded_file is not None:
+            file_content = uploaded_file.read().decode("utf-8")
+            if uploaded_file.name.endswith(".csv"):
+                import csv
+                import io as _io
+                reader = csv.reader(_io.StringIO(file_content))
+                file_domains = []
+                for row in reader:
+                    if row:
+                        d = row[0].strip()
+                        if d and not d.startswith("#"):
+                            file_domains.append(d)
+                domain_input = "\n".join(file_domains)
+            else:
+                domain_input = file_content
+            st.info(f"已从文件加载 {len(domain_input.strip().splitlines())} 个域名")
+
+    st.divider()
+
+    # ── 过滤设置 ──
+    col_filter, col_trends = st.columns(2)
+
+    with col_filter:
+        st.subheader("🔧 过滤设置")
+        filter_tld = st.checkbox("只保留 .com / .ai", value=True, key="filter_tld")
+        filter_digits = st.checkbox("过滤含数字的域名", value=True, key="filter_digits")
+        filter_special = st.checkbox("过滤含特殊字符的域名", value=True, key="filter_special")
+        filter_blacklist = st.checkbox("垃圾行业词过滤", value=True, key="filter_blacklist")
+        filter_random = st.checkbox("随机字符串过滤", value=True, key="filter_random")
+
+    with col_trends:
+        st.subheader("📈 Trends 验证设置")
+        trends_enabled = st.checkbox("启用 Google Trends 二次验证", value=True, key="trends_enabled")
+        trends_timeframe = st.selectbox("趋势时间范围", [
+            ("近 15 天", "today 15-d"),
+            ("近 7 天", "now 7-d"),
+            ("近 30 天", "today 1-m"),
+        ], format_func=lambda x: x[0], index=0, key="trends_timeframe")
+        trends_batch_size = st.slider("每批查询数量", min_value=1, max_value=5, value=5,
+                                       help="Google Trends 每次最多查 5 个关键词", key="trends_batch")
+        trends_interval = st.slider("Trends 请求间隔（秒）", min_value=10, max_value=120, value=60,
+                                     key="trends_interval")
+
+    st.divider()
+
+    # ── 开始筛选 ──
+    col_filter_btn, col_trends_btn = st.columns(2)
+
+    with col_filter_btn:
+        start_filter = st.button("🔍 开始筛选", type="primary", use_container_width=True)
+
+    with col_trends_btn:
+        start_full = st.button("🚀 筛选 + Trends 验证", type="primary", use_container_width=True)
+
+    if (start_filter or start_full) and domain_input.strip():
+        # Step 1: 域名过滤
+        filter_result = filter_domains(domain_input)
+
+        # 根据用户选择决定最终列表
+        final_domains = filter_result["after_random"]  # 默认全部过滤
+
+        # 如果用户关闭了某些过滤步骤，使用对应阶段的结果
+        if not filter_random:
+            final_domains = filter_result["after_blacklist"]
+        if not filter_blacklist:
+            final_domains = filter_result["after_special"]
+        if not filter_special:
+            final_domains = filter_result["after_digits"]
+        if not filter_digits:
+            final_domains = filter_result["after_tld"]
+        if not filter_tld:
+            final_domains = [line.strip() for line in domain_input.strip().splitlines() if line.strip()]
+
+        st.divider()
+        st.subheader("📊 筛选结果")
+
+        # 漏斗统计
+        col_s1, col_s2, col_s3, col_s4, col_s5, col_s6 = st.columns(6)
+        with col_s1:
+            st.metric("输入总数", filter_result["input_total"])
+        with col_s2:
+            st.metric(".com/.ai", len(filter_result["after_tld"]),
+                       delta=f"-{len(filter_result['filtered_out']['tld'])}")
+        with col_s3:
+            st.metric("去数字", len(filter_result["after_digits"]),
+                       delta=f"-{len(filter_result['filtered_out']['digits'])}")
+        with col_s4:
+            st.metric("去特殊字符", len(filter_result["after_special"]),
+                       delta=f"-{len(filter_result['filtered_out']['special'])}")
+        with col_s5:
+            st.metric("去垃圾词", len(filter_result["after_blacklist"]),
+                       delta=f"-{len(filter_result['filtered_out']['blacklist'])}")
+        with col_s6:
+            st.metric("去随机串", len(filter_result["after_random"]),
+                       delta=f"-{len(filter_result['filtered_out']['random'])}")
+
+        st.success(f"✅ 筛选完成！从 **{filter_result['input_total']}** 个域名中筛选出 **{len(final_domains)}** 个有效域名")
+
+        # 展示筛选后的域名
+        if final_domains:
+            with st.expander(f"📋 筛选后域名列表（{len(final_domains)} 个）", expanded=True):
+                domain_df = pd.DataFrame({
+                    "域名": final_domains,
+                    "主体": [extract_domain_body(d) for d in final_domains],
+                    "后缀": ["." + d.rsplit(".", 1)[-1] if "." in d else "" for d in final_domains],
+                })
+                st.dataframe(domain_df, use_container_width=True, hide_index=True, height=300)
+
+        # 展示被过滤的域名（可折叠）
+        for stage, label in [("tld", "非 .com/.ai"), ("digits", "含数字"),
+                              ("special", "含特殊字符"), ("blacklist", "垃圾词命中"),
+                              ("random", "随机字符串")]:
+            filtered = filter_result["filtered_out"][stage]
+            if filtered:
+                with st.expander(f"🗑 {label}（{len(filtered)} 个）"):
+                    st.text("\n".join(filtered[:100]))
+                    if len(filtered) > 100:
+                        st.caption(f"...等共 {len(filtered)} 个")
+
+        # Step 2: Google Trends 验证
+        if start_full and trends_enabled and final_domains:
+            st.divider()
+            st.subheader("📈 Google Trends 二次验证")
+            st.caption(f"对 {len(final_domains)} 个域名关键词查询 Google Trends {trends_timeframe[0]}趋势")
+
+            # 提取域名主体作为搜索关键词
+            keywords = [extract_domain_body(d) for d in final_domains]
+            # 去重
+            seen_kw = set()
+            unique_keywords = []
+            for kw in keywords:
+                if kw not in seen_kw:
+                    unique_keywords.append(kw)
+                    seen_kw.add(kw)
+
+            batches = [unique_keywords[i:i+trends_batch_size]
+                       for i in range(0, len(unique_keywords), trends_batch_size)]
+            total_batches = len(batches)
+
+            progress = st.progress(0, text="准备查询 Google Trends...")
+            status_area = st.empty()
+            effective_interval = trends_interval
+
+            pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
+
+            trends_data = {}  # {keyword: {"has_trend": bool, "avg": float, "max": float, "trend": list, "growth": float}}
+
+            for bi, batch in enumerate(batches):
+                progress.progress(bi / total_batches,
+                                   text=f"查询 Trends: {', '.join(batch[:3])}{'...' if len(batch)>3 else ''} ({bi+1}/{total_batches})")
+
+                retry_count = 0
+                while retry_count < 3:
+                    try:
+                        pytrend.build_payload(kw_list=batch, timeframe=trends_timeframe[1], geo='')
+                        iot = pytrend.interest_over_time()
+
+                        if not iot.empty:
+                            for kw in batch:
+                                if kw in iot.columns:
+                                    series = iot[kw].values.astype(float)
+                                    avg_val = np.mean(series)
+                                    max_val = np.max(series)
+
+                                    # 计算增长趋势：后1/3 vs 前1/3
+                                    if len(series) >= 3:
+                                        split = max(1, len(series) // 3)
+                                        early = np.mean(series[:split])
+                                        late = np.mean(series[-split:])
+                                        if early > 0:
+                                            growth = (late - early) / early * 100
+                                        elif late > 0:
+                                            growth = 999  # 从0增长
+                                        else:
+                                            growth = 0
+                                    else:
+                                        growth = 0
+
+                                    has_trend = avg_val > 0
+                                    trends_data[kw] = {
+                                        "has_trend": has_trend,
+                                        "avg": round(avg_val, 1),
+                                        "max": round(max_val, 1),
+                                        "growth": round(growth, 1),
+                                        "trend": series.tolist(),
+                                    }
+                                else:
+                                    trends_data[kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": []}
+                        else:
+                            for kw in batch:
+                                trends_data[kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": []}
+                        break
+
+                    except TooManyRequestsError:
+                        retry_count += 1
+                        wait = 60 + retry_count * 60 + random.randint(0, 10)
+                        effective_interval = min(effective_interval * 1.5, 300)
+                        status_area.warning(f"⚠️ 触发限流，等待 {wait}s 后重试 ({retry_count}/3)，后续间隔→{effective_interval:.0f}s")
+                        time.sleep(wait)
+                        pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
+                    except Exception as e:
+                        if '429' in str(e):
+                            retry_count += 1
+                            wait = 60 + retry_count * 60 + random.randint(0, 10)
+                            effective_interval = min(effective_interval * 1.5, 300)
+                            status_area.warning(f"⚠️ 触发限流，等待 {wait}s 后重试 ({retry_count}/3)")
+                            time.sleep(wait)
+                            pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
+                        else:
+                            status_area.error(f"❌ 查询失败: {e}")
+                            for kw in batch:
+                                if kw not in trends_data:
+                                    trends_data[kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": []}
+                            break
+
+                if bi < total_batches - 1:
+                    # 每5批多休息一会
+                    if (bi + 1) % 5 == 0:
+                        rest = 3 * 60
+                        status_area.info(f"⏸ 已完成 {bi+1}/{total_batches} 批，休息 3 分钟避免限流...")
+                        time.sleep(rest)
+                        status_area.empty()
+                    else:
+                        time.sleep(effective_interval + random.uniform(0, 3))
+
+            progress.progress(1.0, text="Trends 验证完成！")
+            status_area.empty()
+
+            # 汇总结果
+            growing_domains = []
+            has_volume_domains = []
+            no_volume_domains = []
+
+            for domain in final_domains:
+                kw = extract_domain_body(domain)
+                info = trends_data.get(kw, {})
+                if info.get("growth", 0) > 20:
+                    growing_domains.append({"domain": domain, "keyword": kw, **info})
+                elif info.get("has_trend", False):
+                    has_volume_domains.append({"domain": domain, "keyword": kw, **info})
+                else:
+                    no_volume_domains.append({"domain": domain, "keyword": kw, **info})
+
+            # 展示结果
+            col_g, col_v, col_n = st.columns(3)
+            with col_g:
+                st.metric("🚀 搜索量增长", len(growing_domains))
+            with col_v:
+                st.metric("📊 有搜索量", len(has_volume_domains))
+            with col_n:
+                st.metric("❌ 无搜索量", len(no_volume_domains))
+
+            # 搜索量增长的域名（重点关注）
+            if growing_domains:
+                st.subheader("🚀 搜索量增长的域名（重点关注）")
+                growing_df = pd.DataFrame(growing_domains)
+                growing_df = growing_df.sort_values("growth", ascending=False)
+                display_growing = growing_df[["domain", "keyword", "avg", "max", "growth"]].copy()
+                display_growing.columns = ["域名", "关键词", "平均搜索量", "最高搜索量", "增长率%"]
+                st.dataframe(display_growing, use_container_width=True, hide_index=True)
+
+                # 趋势曲线
+                st.markdown("**趋势曲线：**")
+                cols_per_row = 4
+                for row_start in range(0, min(len(growing_domains), 20), cols_per_row):
+                    cols = st.columns(cols_per_row)
+                    for ci, col in enumerate(cols):
+                        idx = row_start + ci
+                        if idx >= len(growing_domains) or idx >= 20:
+                            break
+                        item = growing_domains[idx]
+                        trend = item.get("trend", [])
+                        if not trend:
+                            continue
+                        with col:
+                            fig_mini = go.Figure()
+                            fig_mini.add_trace(go.Scatter(
+                                y=trend, mode='lines+markers',
+                                line=dict(color='#10b981', width=2),
+                                marker=dict(size=3), hoverinfo='y',
+                            ))
+                            fig_mini.update_layout(
+                                title=dict(text=f"📈 {item['keyword'][:20]}", font=dict(size=12)),
+                                height=160, margin=dict(l=10, r=10, t=30, b=10),
+                                xaxis=dict(showticklabels=False, showgrid=False),
+                                yaxis=dict(showticklabels=False, showgrid=True, gridcolor='#f0f0f0'),
+                                plot_bgcolor='white',
+                            )
+                            st.plotly_chart(fig_mini, use_container_width=True)
+
+                # 下载
+                csv_data = display_growing.to_csv(index=False).encode('utf-8-sig')
+                st.download_button("📥 下载增长域名 CSV", csv_data, "growing_domains.csv", "text/csv",
+                                    use_container_width=True)
+
+                # 飞书通知
+                if growing_domains:
+                    notify = load_notify_config()
+                    webhook = notify.get("feishu_webhook", "")
+                    if webhook:
+                        now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+                        content_lines = [
+                            [{"tag": "text", "text": f"📅 {now}\n从 {filter_result['input_total']} 个新域名中筛选出 {len(final_domains)} 个，{len(growing_domains)} 个有搜索增长"}],
+                        ]
+                        for item in growing_domains[:30]:
+                            growth_str = f"+{item['growth']:.0f}%" if item['growth'] < 999 else "新词飙升"
+                            content_lines.append([{"tag": "text",
+                                                    "text": f"  {item['domain']}  ({growth_str}, 均值{item['avg']})"}])
+                        payload = {
+                            "msg_type": "post",
+                            "content": {"post": {"zh_cn": {
+                                "title": "🌐 域名淘金报告",
+                                "content": content_lines,
+                            }}}
+                        }
+                        try:
+                            feishu_resp = http_requests.post(webhook, json=payload, timeout=10)
+                            if feishu_resp.status_code == 200:
+                                st.success("✅ 飞书通知已发送")
+                        except Exception:
+                            pass
+
+            # 有搜索量但未明显增长
+            if has_volume_domains:
+                with st.expander(f"📊 有搜索量但未明显增长（{len(has_volume_domains)} 个）"):
+                    vol_df = pd.DataFrame(has_volume_domains)
+                    vol_df = vol_df.sort_values("avg", ascending=False)
+                    display_vol = vol_df[["domain", "keyword", "avg", "max", "growth"]].copy()
+                    display_vol.columns = ["域名", "关键词", "平均搜索量", "最高搜索量", "增长率%"]
+                    st.dataframe(display_vol, use_container_width=True, hide_index=True)
+
+            # 无搜索量
+            if no_volume_domains:
+                with st.expander(f"❌ 无搜索量（{len(no_volume_domains)} 个）"):
+                    st.text("\n".join([d["domain"] for d in no_volume_domains[:200]]))
+                    if len(no_volume_domains) > 200:
+                        st.caption(f"...等共 {len(no_volume_domains)} 个")
+
+    elif (start_filter or start_full) and not domain_input.strip():
+        st.error("请输入域名列表或上传文件")

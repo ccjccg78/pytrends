@@ -88,6 +88,17 @@
         "filter_keywords": ["AI", "tool", "agent", "LLM", "GPT", "Claude", "open-source", "launch", "release", "new"]
     },
 
+    "domain_mining": {
+        "auto_download": true,
+        "domain_file": "",
+        "domain_url": "",
+        "domain_dir": "",
+        "trends_timeframe": "today 15-d",
+        "trends_interval": 60,
+        "trends_batch_size": 5,
+        "max_trends_check": 200
+    },
+
     "notify": {
         "feishu_webhook": "",
         "wecom_webhook": "",

@@ -6,11 +6,16 @@
   2. 手动运行: python scheduled_run.py
   3. 定时任务 (北京时间):
      crontab -e 添加:
-     0 21 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode trending
-     0 22,9 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode sitemap
-     0 0 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode rising
-     0 */4 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode twitter
-     0 8,20 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode ai_monitor
+     0 4 * * *    /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode rising        # 04:00 爆增词追踪 ⚡Trends API ~06:30结束
+     30 6 * * *   /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode trending      # 06:30 时下流行（RSS，不用Trends）
+     0 7,17 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode sitemap       # 07:00/17:00 Sitemap 监控
+     0 9 * * *    /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode twitter       # 09:00 Twitter 监控
+     0 10,22 * * * /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode ai_monitor   # 10:00/22:00 AI 平台监控
+     0 11 * * *   /opt/pytrends-git/.venv/bin/python /opt/pytrends-git/scheduled_run.py --mode domain        # 11:00 域名淘金 ⚡Trends API ~12:30结束
+
+  ⚠️ 调度注意：rising(04:00) 和 domain(11:00) 都用 Google Trends API，不能同时运行！
+     当前已错开 4.5 小时（rising ~06:30结束，domain 11:00开始），互不影响。
+     其他模式（trending/sitemap/twitter/ai_monitor）不用 Trends API，可以随意并行。
 
 支持模式:
   --mode trending    采集所有地区时下流行 (默认)
@@ -18,16 +23,19 @@
   --mode sitemap     监控竞品 Sitemap 变化
   --mode twitter     监控 Twitter 账号动态
   --mode ai_monitor  监控 AI 平台动态 (HuggingFace/arXiv/ProductHunt/GitHub/HackerNews)
+  --mode domain      域名淘金：拉取新注册域名 → 过滤 → Trends 验证 → 推飞书
 """
 
 import json
 import time
 import random
+import re
 import os
 import sys
 import argparse
 import xml.etree.ElementTree as ET
 import requests as http_requests
+import numpy as np
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -1329,6 +1337,455 @@ def send_twitter_feishu(webhook_url, all_new_tweets):
         print(f"❌ 飞书通知异常: {e}")
 
 
+# ── 域名淘金 ─────────────────────────────────────────────────
+DOMAIN_CACHE_DIR = Path(__file__).parent / "output" / "domains"
+
+# 垃圾行业词黑名单
+DOMAIN_BLACKLIST = [
+    # 成人类
+    "porn", "xxx", "sex", "sexy", "escort", "adult", "nude", "camgirl", "onlyfans",
+    # 博彩类
+    "casino", "bet", "bets", "betting", "poker", "slot", "slots", "gamble", "gambling", "lottery",
+    # 贷款/灰产类
+    "loan", "loans", "payday", "creditrepair", "cashadvance", "debt",
+    # 仿牌/低质电商类
+    "cheapnike", "cheapadidas", "replica", "fakebrand", "fakewatch", "discountbags",
+    # 加密空投垃圾类
+    "airdrop", "cryptoairdrop", "freecrypto", "claimtoken", "walletclaim",
+    # 停车页/域名交易类
+    "forsale", "buydomain", "premiumdomain", "domainmarket", "domainsale",
+]
+
+
+def _is_valid_tld(domain):
+    """只保留 .com 和 .ai"""
+    d = domain.lower().strip()
+    return d.endswith(".com") or d.endswith(".ai")
+
+
+def _extract_domain_body(domain):
+    """提取域名主体（去 TLD）"""
+    d = domain.lower().strip()
+    if d.endswith(".com"):
+        return d[:-4]
+    elif d.endswith(".ai"):
+        return d[:-3]
+    return d
+
+
+def _is_random_string(body):
+    """判断是否为随机字符串"""
+    clean = body.replace("-", "")
+    if not clean:
+        return True
+    if len(clean) > 25 and "-" not in body:
+        return True
+    vowels = set("aeiou")
+    consonant_run = 0
+    for ch in clean:
+        if ch.isalpha() and ch not in vowels:
+            consonant_run += 1
+            if consonant_run >= 6:
+                return True
+        else:
+            consonant_run = 0
+    digit_count = sum(1 for c in clean if c.isdigit())
+    if len(clean) > 0 and digit_count / len(clean) > 0.4:
+        return True
+    if len(clean) > 8:
+        alpha_chars = [c for c in clean if c.isalpha()]
+        if alpha_chars:
+            consonants = sum(1 for c in alpha_chars if c not in vowels)
+            if consonants / len(alpha_chars) > 0.85:
+                return True
+    return False
+
+
+def _filter_domains(domains):
+    """完整域名过滤流水线，返回 (通过列表, 统计字典)"""
+    stats = {"input": len(domains), "tld": 0, "digits": 0, "special": 0, "blacklist": 0, "random": 0}
+    result = []
+
+    for d in domains:
+        d = d.strip()
+        if not d:
+            continue
+        # 1. TLD
+        if not _is_valid_tld(d):
+            stats["tld"] += 1
+            continue
+        body = _extract_domain_body(d)
+        # 2. 数字
+        if re.search(r'\d', body):
+            stats["digits"] += 1
+            continue
+        # 3. 特殊字符
+        if re.search(r'[^a-z\-]', body):
+            stats["special"] += 1
+            continue
+        # 4. 黑名单
+        if any(word in body for word in DOMAIN_BLACKLIST):
+            stats["blacklist"] += 1
+            continue
+        # 5. 随机串
+        if _is_random_string(body):
+            stats["random"] += 1
+            continue
+        result.append(d)
+
+    stats["passed"] = len(result)
+    return result, stats
+
+
+def _download_whoisds(date_str=None):
+    """从 WhoisDS 下载指定日期的新注册域名 ZIP，解压后返回域名列表
+
+    WhoisDS 免费提供每日新注册域名列表:
+      https://whoisds.com/newly-registered-domains/{date}/nrd
+      日期格式: YYYY-MM-DD
+
+    ZIP 里包含一个 .txt 文件，每行一个域名。
+    数据通常在次日凌晨可用，所以默认拉昨天的。
+    """
+    import zipfile
+    import io
+
+    if not date_str:
+        # 默认拉昨天的数据（WhoisDS 当天数据通常还没生成）
+        yesterday = datetime.now(BEIJING_TZ) - timedelta(days=1)
+        date_str = yesterday.strftime("%Y-%m-%d")
+
+    # WhoisDS 的 URL 需要 base64 编码的日期
+    import base64
+    date_b64 = base64.b64encode(date_str.encode()).decode()
+    url = f"https://whoisds.com/whois-database/newly-registered-domains/{date_b64}/nrd"
+
+    print(f"  📡 从 WhoisDS 下载 {date_str} 新注册域名...")
+    print(f"     URL: {url}")
+
+    resp = http_requests.get(url, timeout=120, headers={
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Accept': 'application/zip, application/octet-stream, */*',
+        'Referer': 'https://whoisds.com/newly-registered-domains',
+    }, allow_redirects=True)
+
+    if resp.status_code != 200:
+        raise Exception(f"HTTP {resp.status_code}")
+
+    content_type = resp.headers.get('Content-Type', '')
+
+    # 检查是否返回了 ZIP
+    if b'PK' not in resp.content[:4] and 'zip' not in content_type.lower():
+        # 可能返回了 HTML 页面（数据还没准备好）
+        if b'<html' in resp.content[:200].lower():
+            raise Exception(f"{date_str} 的数据暂未发布，WhoisDS 返回了 HTML 页面")
+        raise Exception(f"返回非 ZIP 内容 (Content-Type: {content_type})")
+
+    # 解压
+    zf = zipfile.ZipFile(io.BytesIO(resp.content))
+    domains = []
+    for name in zf.namelist():
+        if name.endswith('.txt') or name.endswith('.csv'):
+            text = zf.read(name).decode('utf-8', errors='ignore')
+            for line in text.splitlines():
+                d = line.strip()
+                if d and not d.startswith('#'):
+                    domains.append(d)
+
+    print(f"  ✅ 下载完成: {len(domains)} 个域名（{date_str}）")
+
+    # 保存原始备份
+    DOMAIN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    backup = DOMAIN_CACHE_DIR / f"whoisds_{date_str}.txt"
+    backup.write_text("\n".join(domains), encoding="utf-8")
+    print(f"  💾 备份: {backup}")
+
+    return domains
+
+
+def _fetch_domain_list(domain_config):
+    """获取新注册域名列表
+
+    优先级:
+      1. auto_download: true → 自动从 WhoisDS 下载（免费，推荐）
+      2. domain_file: 本地文件路径
+      3. domain_url: 远程 URL 下载
+      4. domain_dir: 目录，读取最新的 .txt 文件
+    """
+    domains = []
+
+    # 来源0: 自动从 WhoisDS 下载（推荐）
+    auto_download = domain_config.get("auto_download", True)
+    if auto_download:
+        try:
+            domains = _download_whoisds()
+        except Exception as e:
+            print(f"  ⚠️ WhoisDS 自动下载失败: {e}")
+            # 尝试前天的数据作为备选
+            try:
+                day_before = (datetime.now(BEIJING_TZ) - timedelta(days=2)).strftime("%Y-%m-%d")
+                print(f"  🔄 尝试前天 ({day_before}) 的数据...")
+                domains = _download_whoisds(day_before)
+            except Exception as e2:
+                print(f"  ⚠️ 前天数据也失败: {e2}")
+
+        # 如果已有今天的本地备份，直接用缓存（避免重复下载）
+        if not domains:
+            yesterday = (datetime.now(BEIJING_TZ) - timedelta(days=1)).strftime("%Y-%m-%d")
+            cache = DOMAIN_CACHE_DIR / f"whoisds_{yesterday}.txt"
+            if cache.exists():
+                text = cache.read_text(encoding="utf-8", errors="ignore")
+                domains = [line.strip() for line in text.splitlines() if line.strip()]
+                print(f"  📂 使用本地缓存: {cache.name}（{len(domains)} 个域名）")
+
+    # 来源1: 本地文件
+    domain_file = domain_config.get("domain_file", "")
+    if domain_file and not domains:
+        p = Path(domain_file)
+        if p.exists():
+            text = p.read_text(encoding="utf-8", errors="ignore")
+            domains = [line.strip() for line in text.splitlines() if line.strip()]
+            print(f"  📂 从文件加载: {p.name}（{len(domains)} 个域名）")
+        else:
+            print(f"  ⚠️ 文件不存在: {domain_file}")
+
+    # 来源2: 远程 URL
+    domain_url = domain_config.get("domain_url", "")
+    if domain_url and not domains:
+        try:
+            print(f"  📡 从 URL 下载域名列表...")
+            resp = http_requests.get(domain_url, timeout=60, headers={
+                'User-Agent': 'Mozilla/5.0'})
+            resp.raise_for_status()
+            text = resp.text
+            domains = [line.strip() for line in text.splitlines() if line.strip()]
+            print(f"  ✅ 下载完成: {len(domains)} 个域名")
+
+            DOMAIN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+            today = datetime.now(BEIJING_TZ).strftime('%Y%m%d')
+            backup = DOMAIN_CACHE_DIR / f"raw_{today}.txt"
+            backup.write_text("\n".join(domains), encoding="utf-8")
+        except Exception as e:
+            print(f"  ❌ 下载失败: {e}")
+
+    # 来源3: 目录中最新文件
+    domain_dir = domain_config.get("domain_dir", "")
+    if domain_dir and not domains:
+        p = Path(domain_dir)
+        if p.is_dir():
+            txt_files = sorted(p.glob("*.txt"), key=lambda f: f.stat().st_mtime, reverse=True)
+            if txt_files:
+                latest = txt_files[0]
+                text = latest.read_text(encoding="utf-8", errors="ignore")
+                domains = [line.strip() for line in text.splitlines() if line.strip()]
+                print(f"  📂 从目录加载最新文件: {latest.name}（{len(domains)} 个域名）")
+            else:
+                print(f"  ⚠️ 目录中没有 .txt 文件: {domain_dir}")
+
+    return domains
+
+
+def _trends_validate_domains(keywords, config):
+    """用 Google Trends 验证域名关键词，返回 {keyword: {has_trend, avg, max, growth, trend}}"""
+    domain_config = config.get("domain_mining", {})
+    timeframe = domain_config.get("trends_timeframe", "today 15-d")
+    interval = domain_config.get("trends_interval", 60)
+    batch_size = min(5, domain_config.get("trends_batch_size", 5))
+
+    batches = [keywords[i:i+batch_size] for i in range(0, len(keywords), batch_size)]
+    total_batches = len(batches)
+    effective_interval = interval
+
+    pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
+    trends_data = {}
+
+    for bi, batch in enumerate(batches):
+        print(f"  📈 Trends [{bi+1}/{total_batches}]: {', '.join(batch[:3])}{'...' if len(batch)>3 else ''}")
+
+        retry_count = 0
+        while retry_count < 3:
+            try:
+                pytrend.build_payload(kw_list=batch, timeframe=timeframe, geo='')
+                iot = pytrend.interest_over_time()
+
+                if not iot.empty:
+                    for kw in batch:
+                        if kw in iot.columns:
+                            series = iot[kw].values.astype(float)
+                            avg_val = np.mean(series)
+                            max_val = np.max(series)
+                            if len(series) >= 3:
+                                split = max(1, len(series) // 3)
+                                early = np.mean(series[:split])
+                                late = np.mean(series[-split:])
+                                if early > 0:
+                                    growth = (late - early) / early * 100
+                                elif late > 0:
+                                    growth = 999
+                                else:
+                                    growth = 0
+                            else:
+                                growth = 0
+                            trends_data[kw] = {
+                                "has_trend": avg_val > 0,
+                                "avg": round(avg_val, 1),
+                                "max": round(max_val, 1),
+                                "growth": round(growth, 1),
+                                "trend": series.tolist(),
+                            }
+                        else:
+                            trends_data[kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": []}
+                else:
+                    for kw in batch:
+                        trends_data[kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": []}
+                break
+
+            except TooManyRequestsError:
+                retry_count += 1
+                wait = 60 + retry_count * 60 + random.randint(0, 10)
+                effective_interval = min(effective_interval * 1.5, 300)
+                print(f"    ⚠️ 429 限流，等待 {wait}s ({retry_count}/3)，后续间隔→{effective_interval:.0f}s")
+                time.sleep(wait)
+                pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
+            except Exception as e:
+                if '429' in str(e):
+                    retry_count += 1
+                    wait = 60 + retry_count * 60 + random.randint(0, 10)
+                    effective_interval = min(effective_interval * 1.5, 300)
+                    print(f"    ⚠️ 429 限流，等待 {wait}s ({retry_count}/3)")
+                    time.sleep(wait)
+                    pytrend = TrendReq(hl='en-US', tz=360, timeout=(10, 30), retries=2, backoff_factor=1)
+                else:
+                    print(f"    ❌ 查询失败: {e}")
+                    for kw in batch:
+                        if kw not in trends_data:
+                            trends_data[kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": []}
+                    break
+
+        if bi < total_batches - 1:
+            if (bi + 1) % 5 == 0:
+                print(f"    ⏸ 已完成 {bi+1}/{total_batches} 批，休息3分钟...")
+                time.sleep(3 * 60)
+            else:
+                time.sleep(effective_interval + random.uniform(0, 3))
+
+    return trends_data
+
+
+def fetch_and_filter_domains(config):
+    """完整域名淘金流水线：拉取 → 过滤 → Trends 验证"""
+    domain_config = config.get("domain_mining", {})
+    if not domain_config:
+        print("❌ 未配置 domain_mining，跳过")
+        return [], [], {}
+
+    # Step 1: 拉取域名
+    print("\n📥 拉取新注册域名...")
+    raw_domains = _fetch_domain_list(domain_config)
+    if not raw_domains:
+        print("❌ 未获取到域名数据")
+        return [], [], {}
+
+    # Step 2: 过滤
+    print(f"\n🔍 过滤域名（{len(raw_domains)} 个输入）...")
+    filtered, stats = _filter_domains(raw_domains)
+    print(f"  过滤统计:")
+    print(f"    输入: {stats['input']}")
+    print(f"    非 .com/.ai: -{stats['tld']}")
+    print(f"    含数字: -{stats['digits']}")
+    print(f"    含特殊字符: -{stats['special']}")
+    print(f"    垃圾词命中: -{stats['blacklist']}")
+    print(f"    随机字符串: -{stats['random']}")
+    print(f"    ✅ 通过: {stats['passed']}")
+
+    if not filtered:
+        print("❌ 过滤后无有效域名")
+        return [], [], stats
+
+    # Step 3: Trends 验证
+    max_trends = domain_config.get("max_trends_check", 200)
+    to_check = filtered[:max_trends]
+    keywords = list(dict.fromkeys([_extract_domain_body(d) for d in to_check]))  # 去重保序
+    print(f"\n📈 Google Trends 验证（{len(keywords)} 个关键词）...")
+    trends_data = _trends_validate_domains(keywords, config)
+
+    # 分类结果
+    growing = []
+    has_volume = []
+    for domain in to_check:
+        kw = _extract_domain_body(domain)
+        info = trends_data.get(kw, {})
+        item = {"domain": domain, "keyword": kw, **info}
+        if info.get("growth", 0) > 20:
+            growing.append(item)
+        elif info.get("has_trend", False):
+            has_volume.append(item)
+
+    growing.sort(key=lambda x: x.get("growth", 0), reverse=True)
+    has_volume.sort(key=lambda x: x.get("avg", 0), reverse=True)
+
+    print(f"\n📊 结果:")
+    print(f"  🚀 搜索量增长: {len(growing)}")
+    print(f"  📊 有搜索量: {len(has_volume)}")
+    print(f"  ❌ 无搜索量: {len(to_check) - len(growing) - len(has_volume)}")
+
+    # 保存结果 CSV
+    DOMAIN_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    today = datetime.now(BEIJING_TZ).strftime('%Y%m%d')
+    if growing:
+        import csv
+        csv_path = DOMAIN_CACHE_DIR / f"growing_{today}.csv"
+        with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=["domain", "keyword", "avg", "max", "growth"])
+            writer.writeheader()
+            for item in growing:
+                writer.writerow({k: item.get(k, "") for k in ["domain", "keyword", "avg", "max", "growth"]})
+        print(f"  💾 已保存: {csv_path}")
+
+    return growing, has_volume, stats
+
+
+def send_domain_feishu(webhook_url, growing, has_volume, stats):
+    """推送域名淘金结果到飞书"""
+    now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+
+    summary = (f"📅 {now}\n"
+               f"输入 {stats.get('input', 0)} 个域名 → 过滤后 {stats.get('passed', 0)} 个\n"
+               f"🚀 {len(growing)} 个搜索量增长  📊 {len(has_volume)} 个有搜索量")
+
+    content_lines = [[{"tag": "text", "text": summary}]]
+
+    if growing:
+        content_lines.append([{"tag": "text", "text": "\n🚀 搜索量增长（重点关注）:"}])
+        for item in growing[:30]:
+            growth_str = f"+{item['growth']:.0f}%" if item.get('growth', 0) < 999 else "新词飙升"
+            content_lines.append([{"tag": "text",
+                                    "text": f"  {item['domain']}  ({growth_str}, 均值{item.get('avg', 0)})"}])
+
+    if has_volume:
+        content_lines.append([{"tag": "text", "text": f"\n📊 有搜索量（{len(has_volume)} 个，前10）:"}])
+        for item in has_volume[:10]:
+            content_lines.append([{"tag": "text",
+                                    "text": f"  {item['domain']}  (均值{item.get('avg', 0)}, 增长{item.get('growth', 0):.0f}%)"}])
+
+    payload = {
+        "msg_type": "post",
+        "content": {"post": {"zh_cn": {
+            "title": "🌐 域名淘金报告",
+            "content": content_lines,
+        }}}
+    }
+
+    try:
+        resp = http_requests.post(webhook_url, json=payload, timeout=10)
+        if resp.status_code == 200:
+            print("✅ 飞书域名淘金通知发送成功")
+        else:
+            print(f"❌ 飞书通知失败: {resp.status_code} {resp.text}")
+    except Exception as e:
+        print(f"❌ 飞书通知异常: {e}")
+
+
 # ── 保存结果 ──────────────────────────────────────────────────
 def save_trending_csv(all_results):
     import pandas as pd
@@ -1345,8 +1802,8 @@ def save_trending_csv(all_results):
 # ── 主流程 ────────────────────────────────────────────────────
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--mode', choices=['trending', 'rising', 'sitemap', 'twitter', 'ai_monitor'], default='trending',
-                        help='trending=时下流行, rising=爆增词追踪, sitemap=Sitemap监控, twitter=Twitter监控, ai_monitor=AI平台监控')
+    parser.add_argument('--mode', choices=['trending', 'rising', 'sitemap', 'twitter', 'ai_monitor', 'domain'], default='trending',
+                        help='trending=时下流行, rising=爆增词追踪, sitemap=Sitemap监控, twitter=Twitter监控, ai_monitor=AI平台监控, domain=域名淘金')
     args = parser.parse_args()
 
     now_bj = datetime.now(BEIJING_TZ).strftime('%Y-%m-%d %H:%M:%S')
@@ -1434,6 +1891,19 @@ def main():
             print(f"\n✅ 完成! {len(all_results)} 个平台有新内容，共 {total} 条")
         else:
             print("✅ 所有平台无新内容")
+
+    elif args.mode == 'domain':
+        # 域名淘金
+        print("\n🌐 开始域名淘金...")
+        growing, has_volume, stats = fetch_and_filter_domains(config)
+
+        if growing or has_volume:
+            if webhook:
+                print("\n📮 发送飞书通知...")
+                send_domain_feishu(webhook, growing, has_volume, stats)
+            print(f"\n✅ 完成! {len(growing)} 个增长域名, {len(has_volume)} 个有搜索量")
+        else:
+            print("❌ 未找到有价值的域名")
 
 
 if __name__ == "__main__":
