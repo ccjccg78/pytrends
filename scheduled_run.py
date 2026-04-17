@@ -1442,6 +1442,18 @@ DOMAIN_BLACKLIST = [
     "forsale", "buydomain", "premiumdomain", "domainmarket", "domainsale",
 ]
 
+# 低质量前缀/后缀词
+JUNK_PREFIXES = [
+    "best", "top", "free", "cheap", "buy", "get", "my", "the",
+    "pro", "vip", "real", "fast", "easy", "super", "mega", "ultra",
+    "shop", "store", "deals", "offer", "discount", "sale", "price",
+    "online", "web", "site", "page", "link", "click", "visit",
+    "info", "help", "support", "service", "services", "solution", "solutions",
+]
+
+DOMAIN_MIN_LENGTH = 6
+DOMAIN_MAX_LENGTH = 20
+
 
 def _is_valid_tld(domain):
     """只保留 .com 和 .ai"""
@@ -1547,7 +1559,8 @@ def _get_trends_keyword(body):
 
 def _filter_domains(domains):
     """完整域名过滤流水线，返回 (通过列表, 统计字典)"""
-    stats = {"input": len(domains), "tld": 0, "digits": 0, "special": 0, "blacklist": 0, "random": 0}
+    stats = {"input": len(domains), "tld": 0, "digits": 0, "special": 0,
+             "blacklist": 0, "length": 0, "junk": 0, "random": 0}
     result = []
 
     for d in domains:
@@ -1571,7 +1584,15 @@ def _filter_domains(domains):
         if any(word in body for word in DOMAIN_BLACKLIST):
             stats["blacklist"] += 1
             continue
-        # 5. 随机串
+        # 5. 长度过滤
+        if len(body) < DOMAIN_MIN_LENGTH or len(body) > DOMAIN_MAX_LENGTH:
+            stats["length"] += 1
+            continue
+        # 6. 低质前缀/后缀
+        if any(body.startswith(j) or body.endswith(j) for j in JUNK_PREFIXES):
+            stats["junk"] += 1
+            continue
+        # 7. 随机串
         if _is_random_string(body):
             stats["random"] += 1
             continue
@@ -1857,6 +1878,8 @@ def fetch_and_filter_domains(config):
     print(f"    含数字: -{stats['digits']}")
     print(f"    含特殊字符: -{stats['special']}")
     print(f"    垃圾词命中: -{stats['blacklist']}")
+    print(f"    长度异常: -{stats['length']}")
+    print(f"    低质前缀: -{stats['junk']}")
     print(f"    随机字符串: -{stats['random']}")
     print(f"    ✅ 通过: {stats['passed']}")
 

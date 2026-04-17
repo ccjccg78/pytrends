@@ -1648,6 +1648,18 @@ with tab6:
         "forsale", "buydomain", "premiumdomain", "domainmarket", "domainsale",
     ]
 
+    # 低质量前缀/后缀词（常见垃圾域名套路）
+    JUNK_PREFIXES = [
+        "best", "top", "free", "cheap", "buy", "get", "my", "the",
+        "pro", "vip", "real", "fast", "easy", "super", "mega", "ultra",
+        "shop", "store", "deals", "offer", "discount", "sale", "price",
+        "online", "web", "site", "page", "link", "click", "visit",
+        "info", "help", "support", "service", "services", "solution", "solutions",
+    ]
+
+    DOMAIN_MIN_LENGTH = 6
+    DOMAIN_MAX_LENGTH = 20
+
     def is_valid_tld(domain):
         """只保留 .com 和 .ai 域名"""
         domain_lower = domain.lower().strip()
@@ -1721,6 +1733,17 @@ with tab6:
             return " ".join(good_words)
         return body
 
+    def bad_length(body):
+        """域名主体长度不在合理范围"""
+        return len(body) < DOMAIN_MIN_LENGTH or len(body) > DOMAIN_MAX_LENGTH
+
+    def has_junk_prefix(body):
+        """域名主体以低质量前缀开头或结尾"""
+        for junk in JUNK_PREFIXES:
+            if body.startswith(junk) or body.endswith(junk):
+                return True
+        return False
+
     def filter_domains(domains_text):
         """完整的域名过滤流水线"""
         lines = [line.strip() for line in domains_text.strip().splitlines() if line.strip()]
@@ -1731,12 +1754,16 @@ with tab6:
             "after_digits": [],
             "after_special": [],
             "after_blacklist": [],
+            "after_length": [],
+            "after_junk": [],
             "after_random": [],
             "filtered_out": {
                 "tld": [],
                 "digits": [],
                 "special": [],
                 "blacklist": [],
+                "length": [],
+                "junk": [],
                 "random": [],
             }
         }
@@ -1772,8 +1799,24 @@ with tab6:
             else:
                 results["filtered_out"]["blacklist"].append(d)
 
-        # Step 5: 随机字符串过滤
+        # Step 5: 域名长度过滤（<6 或 >20）
         for d in results["after_blacklist"]:
+            body = extract_domain_body(d)
+            if not bad_length(body):
+                results["after_length"].append(d)
+            else:
+                results["filtered_out"]["length"].append(d)
+
+        # Step 6: 低质量前缀/后缀过滤
+        for d in results["after_length"]:
+            body = extract_domain_body(d)
+            if not has_junk_prefix(body):
+                results["after_junk"].append(d)
+            else:
+                results["filtered_out"]["junk"].append(d)
+
+        # Step 7: 随机字符串过滤（wordninja 拆词）
+        for d in results["after_junk"]:
             body = extract_domain_body(d)
             if not is_random_string(body):
                 results["after_random"].append(d)
@@ -1906,26 +1949,14 @@ with tab6:
         # Step 1: 域名过滤
         filter_result = filter_domains(domain_input)
 
-        # 根据用户选择决定最终列表
-        final_domains = filter_result["after_random"]  # 默认全部过滤
-
-        # 如果用户关闭了某些过滤步骤，使用对应阶段的结果
-        if not filter_random:
-            final_domains = filter_result["after_blacklist"]
-        if not filter_blacklist:
-            final_domains = filter_result["after_special"]
-        if not filter_special:
-            final_domains = filter_result["after_digits"]
-        if not filter_digits:
-            final_domains = filter_result["after_tld"]
-        if not filter_tld:
-            final_domains = [line.strip() for line in domain_input.strip().splitlines() if line.strip()]
+        # 最终列表
+        final_domains = filter_result["after_random"]
 
         st.divider()
         st.subheader("📊 筛选结果")
 
-        # 漏斗统计
-        col_s1, col_s2, col_s3, col_s4, col_s5, col_s6 = st.columns(6)
+        # 漏斗统计（两行展示）
+        col_s1, col_s2, col_s3, col_s4 = st.columns(4)
         with col_s1:
             st.metric("输入总数", filter_result["input_total"])
         with col_s2:
@@ -1937,10 +1968,18 @@ with tab6:
         with col_s4:
             st.metric("去特殊字符", len(filter_result["after_special"]),
                        delta=f"-{len(filter_result['filtered_out']['special'])}")
+
+        col_s5, col_s6, col_s7, col_s8 = st.columns(4)
         with col_s5:
             st.metric("去垃圾词", len(filter_result["after_blacklist"]),
                        delta=f"-{len(filter_result['filtered_out']['blacklist'])}")
         with col_s6:
+            st.metric("去长度异常", len(filter_result["after_length"]),
+                       delta=f"-{len(filter_result['filtered_out']['length'])}")
+        with col_s7:
+            st.metric("去低质前缀", len(filter_result["after_junk"]),
+                       delta=f"-{len(filter_result['filtered_out']['junk'])}")
+        with col_s8:
             st.metric("去随机串", len(filter_result["after_random"]),
                        delta=f"-{len(filter_result['filtered_out']['random'])}")
 
@@ -1960,6 +1999,7 @@ with tab6:
         # 展示被过滤的域名（可折叠）
         for stage, label in [("tld", "非 .com/.ai"), ("digits", "含数字"),
                               ("special", "含特殊字符"), ("blacklist", "垃圾词命中"),
+                              ("length", "长度异常"), ("junk", "低质前缀/后缀"),
                               ("random", "随机字符串")]:
             filtered = filter_result["filtered_out"][stage]
             if filtered:
