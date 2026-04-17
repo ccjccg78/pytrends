@@ -2061,24 +2061,26 @@ with tab6:
             trends_data = {}
             stopped = False
 
-            def _send_round_feishu(growing_items, round_idx, total_r, checked_count, total_count):
-                """每轮完成后即时推送飞书"""
+            def _send_round_feishu(spike_items, round_idx, total_r, checked_count, total_count):
+                """每轮完成后推送新词爆发到飞书（只推单词格式）"""
                 notify = load_notify_config()
                 webhook = notify.get("feishu_webhook", "")
-                if not webhook or not growing_items:
+                if not webhook or not spike_items:
                     return
                 now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
                 content_lines = [
-                    [{"tag": "text", "text": f"📅 {now}\n第 {round_idx}/{total_r} 轮完成（已查 {checked_count}/{total_count}），本轮发现 {len(growing_items)} 个增长域名"}],
+                    [{"tag": "text", "text": f"📅 {now}\n第 {round_idx}/{total_r} 轮（已查 {checked_count}/{total_count}），发现 {len(spike_items)} 个新词爆发"}],
                 ]
-                for item in growing_items[:20]:
-                    growth_str = f"+{item['growth']:.0f}%" if item.get('growth', 0) < 999 else "新词飙升"
+                for item in spike_items[:20]:
+                    kw = item.get("keyword", "")
+                    late = item.get("late", 0)
+                    max_val = item.get("max", 0)
                     content_lines.append([{"tag": "text",
-                                            "text": f"  {item['domain']}  ({growth_str}, 均值{item.get('avg', 0)})"}])
+                                            "text": f"  {kw}  (当前热度{late}, 峰值{max_val})"}])
                 payload = {
                     "msg_type": "post",
                     "content": {"post": {"zh_cn": {
-                        "title": f"🌐 域名淘金 第{round_idx}轮",
+                        "title": f"🔥 新词爆发 第{round_idx}轮",
                         "content": content_lines,
                     }}}
                 }
@@ -2127,6 +2129,8 @@ with tab6:
                                             "has_trend": avg_val > 0,
                                             "avg": round(avg_val, 1), "max": round(max_val, 1),
                                             "growth": round(growth, 1), "trend": series.tolist(),
+                                            "early": round(early, 1) if len(series) >= 3 else 0,
+                                            "late": round(late, 1) if len(series) >= 3 else 0,
                                         }
                                     else:
                                         trends_data[kw] = {"has_trend": False, "avg": 0, "max": 0, "growth": 0, "trend": []}
@@ -2168,13 +2172,24 @@ with tab6:
                         time.sleep(effective_interval + random.uniform(0, 3))
 
                 # 本轮结果汇总
+                round_spikes = []  # 新词爆发（重点推送）
                 for kw in round_keywords:
                     info = trends_data.get(kw, {})
                     for domain in kw_to_domains.get(kw, []):
                         item = {"domain": domain, "keyword": kw, **info}
-                        if info.get("growth", 0) > 20:
+                        early = info.get("early", 0)
+                        late = info.get("late", 0)
+                        growth = info.get("growth", 0)
+
+                        # 新词爆发：之前几乎没流量(early<2)，现在有了(late>=5)
+                        is_spike = early < 2 and late >= 5
+                        item["is_spike"] = is_spike
+
+                        if growth > 20:
                             round_growing.append(item)
                             all_growing.append(item)
+                            if is_spike:
+                                round_spikes.append(item)
                         elif info.get("has_trend", False):
                             all_has_volume.append(item)
                         else:
@@ -2182,12 +2197,14 @@ with tab6:
 
                 checked = min((ri + 1) * ROUND_SIZE, total_kw)
 
-                # 即时推送本轮结果到飞书
-                _send_round_feishu(round_growing, round_num, total_rounds, checked, total_kw)
-                if round_growing:
-                    status_area.success(f"✅ 第 {round_num} 轮完成！发现 {len(round_growing)} 个增长域名，已推飞书")
+                # 只推送新词爆发的到飞书（单词格式，不要域名格式）
+                _send_round_feishu(round_spikes, round_num, total_rounds, checked, total_kw)
+                if round_spikes:
+                    status_area.success(f"✅ 第 {round_num} 轮完成！发现 {len(round_spikes)} 个新词爆发，已推飞书")
+                elif round_growing:
+                    status_area.info(f"第 {round_num} 轮完成，{len(round_growing)} 个增长但无新词爆发")
                 else:
-                    status_area.info(f"第 {round_num} 轮完成，本轮无增长域名")
+                    status_area.info(f"第 {round_num} 轮完成，无增长")
 
                 # 实时更新结果展示
                 with results_area.container():
@@ -2231,23 +2248,26 @@ with tab6:
                 st.download_button("📥 下载增长域名 CSV", csv_data, "growing_domains.csv", "text/csv",
                                     use_container_width=True)
 
-                # 最终汇总飞书
+                # 最终汇总飞书 — 只推新词爆发
+                all_spikes = [item for item in all_growing if item.get("is_spike", False)]
                 notify = load_notify_config()
                 webhook = notify.get("feishu_webhook", "")
-                if webhook:
+                if webhook and all_spikes:
                     now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
                     status_text = "已停止" if stopped else "全部完成"
                     checked = len(all_growing) + len(all_has_volume) + len(all_no_volume)
                     content_lines = [
-                        [{"tag": "text", "text": f"📅 {now}\n{status_text}！共查 {checked}/{total_kw} 个关键词\n🚀 {len(all_growing)} 个增长  📊 {len(all_has_volume)} 个有量"}],
+                        [{"tag": "text", "text": f"📅 {now}\n{status_text}！共查 {checked}/{total_kw}\n🔥 {len(all_spikes)} 个新词爆发（之前无流量，近期突然爆起）"}],
                     ]
-                    for item in all_growing[:30]:
-                        growth_str = f"+{item['growth']:.0f}%" if item.get('growth', 0) < 999 else "新词飙升"
-                        content_lines.append([{"tag": "text", "text": f"  {item['domain']}  ({growth_str}, 均值{item.get('avg', 0)})"}])
+                    for item in all_spikes[:30]:
+                        kw = item.get("keyword", "")
+                        late = item.get("late", 0)
+                        max_val = item.get("max", 0)
+                        content_lines.append([{"tag": "text", "text": f"  {kw}  (当前热度{late}, 峰值{max_val})"}])
                     payload = {
                         "msg_type": "post",
                         "content": {"post": {"zh_cn": {
-                            "title": "🌐 域名淘金 最终报告",
+                            "title": "🔥 新词爆发 最终汇总",
                             "content": content_lines,
                         }}}
                     }
