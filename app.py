@@ -1663,14 +1663,14 @@ with tab6:
     def is_valid_tld(domain):
         """只保留 .com 和 .ai 域名"""
         domain_lower = domain.lower().strip()
-        return domain_lower.endswith(".com") or domain_lower.endswith(".ai")
+        return domain_lower.endswith(".com")
 
     def extract_domain_body(domain):
         """提取域名主体部分（去掉 TLD）"""
         domain_lower = domain.lower().strip()
         if domain_lower.endswith(".com"):
             return domain_lower[:-4]
-        elif domain_lower.endswith(".ai"):
+        elif domain_lower.endswith(".ai"):  # 备用，暂不启用
             return domain_lower[:-3]
         return domain_lower
 
@@ -1768,7 +1768,7 @@ with tab6:
             }
         }
 
-        # Step 1: 只保留 .com / .ai
+        # Step 1: 只保留 .com
         for d in lines:
             if is_valid_tld(d):
                 results["after_tld"].append(d)
@@ -1915,7 +1915,7 @@ with tab6:
 
     with col_filter:
         st.subheader("🔧 过滤设置")
-        filter_tld = st.checkbox("只保留 .com / .ai", value=True, key="filter_tld")
+        filter_tld = st.checkbox("只保留 .com", value=True, key="filter_tld")
         filter_digits = st.checkbox("过滤含数字的域名", value=True, key="filter_digits")
         filter_special = st.checkbox("过滤含特殊字符的域名", value=True, key="filter_special")
         filter_blacklist = st.checkbox("垃圾行业词过滤", value=True, key="filter_blacklist")
@@ -1960,7 +1960,7 @@ with tab6:
         with col_s1:
             st.metric("输入总数", filter_result["input_total"])
         with col_s2:
-            st.metric(".com/.ai", len(filter_result["after_tld"]),
+            st.metric(".com", len(filter_result["after_tld"]),
                        delta=f"-{len(filter_result['filtered_out']['tld'])}")
         with col_s3:
             st.metric("去数字", len(filter_result["after_digits"]),
@@ -1997,7 +1997,7 @@ with tab6:
                 st.dataframe(domain_df, use_container_width=True, hide_index=True, height=300)
 
         # 展示被过滤的域名（可折叠）
-        for stage, label in [("tld", "非 .com/.ai"), ("digits", "含数字"),
+        for stage, label in [("tld", "非 .com"), ("digits", "含数字"),
                               ("special", "含特殊字符"), ("blacklist", "垃圾词命中"),
                               ("length", "长度异常"), ("junk", "低质前缀/后缀"),
                               ("random", "随机字符串")]:

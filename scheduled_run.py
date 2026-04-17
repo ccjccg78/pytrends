@@ -1458,7 +1458,7 @@ DOMAIN_MAX_LENGTH = 20
 def _is_valid_tld(domain):
     """只保留 .com 和 .ai"""
     d = domain.lower().strip()
-    return d.endswith(".com") or d.endswith(".ai")
+    return d.endswith(".com")
 
 
 def _extract_domain_body(domain):
@@ -1466,7 +1466,7 @@ def _extract_domain_body(domain):
     d = domain.lower().strip()
     if d.endswith(".com"):
         return d[:-4]
-    elif d.endswith(".ai"):
+    elif d.endswith(".ai"):  # 备用，暂不启用
         return d[:-3]
     return d
 
