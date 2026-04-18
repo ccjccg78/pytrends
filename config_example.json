@@ -70,8 +70,17 @@
                  "lyrics", "chords", "tab ", "mugshot"]
     },
 
-    "sitemap_urls": [
-        "https://example.com/sitemap.xml"
+    "sitemap_groups": [
+        {
+            "name": "SaaS 工具",
+            "feishu_webhook": "",
+            "urls": ["https://example.com/sitemap.xml"]
+        },
+        {
+            "name": "游戏",
+            "feishu_webhook": "",
+            "urls": []
+        }
     ],
 
     "ai_monitor": {

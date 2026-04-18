@@ -813,177 +813,186 @@ with tab3:
                         pass
         return urls
 
-    # 从 config.json 读取已配置的 sitemap URL
-    config_sitemaps = APP_CONFIG.get("sitemap_urls", [])
+    # ── 分组配置 ──
+    # 兼容旧配置：如果只有 sitemap_urls（旧格式），自动迁移到 sitemap_groups
+    if "sitemap_groups" not in APP_CONFIG and "sitemap_urls" in APP_CONFIG:
+        APP_CONFIG["sitemap_groups"] = [{
+            "name": "默认分组",
+            "feishu_webhook": APP_CONFIG.get("notify", {}).get("feishu_webhook", ""),
+            "urls": APP_CONFIG.get("sitemap_urls", []),
+        }]
+        save_config(APP_CONFIG)
 
-    st.subheader("📋 监控列表")
+    sitemap_groups = APP_CONFIG.get("sitemap_groups", [])
 
-    if config_sitemaps:
-        # 初始化选中状态（默认全选）
-        if "sitemap_checked" not in st.session_state:
-            st.session_state.sitemap_checked = [True] * len(config_sitemaps)
-        # 同步长度
-        while len(st.session_state.sitemap_checked) < len(config_sitemaps):
-            st.session_state.sitemap_checked.append(True)
-        st.session_state.sitemap_checked = st.session_state.sitemap_checked[:len(config_sitemaps)]
+    # ── 分组管理 ──
+    st.subheader("📂 监控分组")
+    st.caption("不同品类分开监控，各自推送到独立的飞书群")
 
-        # 全选 / 全不选
-        col_all, col_none, _ = st.columns([1, 1, 4])
-        with col_all:
-            if st.button("☑ 全选", key="select_all_sitemap"):
-                st.session_state.sitemap_checked = [True] * len(config_sitemaps)
-                st.rerun()
-        with col_none:
-            if st.button("☐ 全不选", key="deselect_all_sitemap"):
-                st.session_state.sitemap_checked = [False] * len(config_sitemaps)
-                st.rerun()
-
-        for i, url in enumerate(config_sitemaps):
-            domain = urlparse(url).netloc
-            has_cache = (SITEMAP_DIR / f"{domain}.json").exists() or (SITEMAP_DIR / f"{domain}.xml").exists()
-            status = "✅ 已有快照" if has_cache else "🆕 待首次采集"
-            col_chk, col_url, col_del = st.columns([0.5, 5, 0.8])
-            with col_chk:
-                st.session_state.sitemap_checked[i] = st.checkbox(
-                    "选中", value=st.session_state.sitemap_checked[i],
-                    key=f"chk_sitemap_{i}", label_visibility="collapsed")
-            with col_url:
-                st.markdown(f"**{i+1}.** `{url}`  {status}")
-            with col_del:
-                if st.button("🗑", key=f"del_sitemap_{i}", help="删除此站点"):
-                    config_sitemaps.pop(i)
-                    st.session_state.sitemap_checked.pop(i)
-                    APP_CONFIG["sitemap_urls"] = config_sitemaps
-                    save_config(APP_CONFIG)
-                    st.rerun()
-    else:
-        st.info("暂无监控站点，请在下方添加。")
-
-    # 批量添加 sitemap
-    new_sitemap_urls = st.text_area("添加 Sitemap URL（每行一个）",
-                                     placeholder="https://example.com/sitemap.xml\nhttps://another-site.com/sitemap.xml",
-                                     height=100, key="sitemap_input")
-    if st.button("➕ 批量添加", key="add_sitemap"):
-        if new_sitemap_urls.strip():
-            added = 0
-            for line in new_sitemap_urls.strip().splitlines():
-                url = line.strip()
-                if not url:
-                    continue
-                if not url.startswith("http"):
-                    url = "https://" + url
-                if url not in config_sitemaps:
-                    config_sitemaps.append(url)
-                    added += 1
-            if added > 0:
-                APP_CONFIG["sitemap_urls"] = config_sitemaps
+    # 新建分组
+    with st.expander("➕ 新建分组"):
+        new_group_name = st.text_input("分组名称", placeholder="如: 游戏、SaaS 工具", key="new_group_name")
+        new_group_webhook = st.text_input("飞书 Webhook（留空则用全局配置）", placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/xxx", key="new_group_webhook")
+        if st.button("✅ 创建分组", key="create_group"):
+            if new_group_name.strip():
+                sitemap_groups.append({
+                    "name": new_group_name.strip(),
+                    "feishu_webhook": new_group_webhook.strip(),
+                    "urls": [],
+                })
+                APP_CONFIG["sitemap_groups"] = sitemap_groups
                 save_config(APP_CONFIG)
-                st.success(f"已添加 {added} 个站点")
+                st.success(f"已创建分组: {new_group_name.strip()}")
                 st.rerun()
             else:
-                st.warning("没有新站点可添加（已存在或输入为空）")
-        else:
-            st.warning("请输入 URL")
+                st.warning("请输入分组名称")
 
-    st.divider()
+    if not sitemap_groups:
+        st.info("暂无分组，请先创建。")
+    else:
+        # 分组标签页
+        group_tabs = st.tabs([f"{g['name']}（{len(g.get('urls', []))}）" for g in sitemap_groups])
 
-    # 筛选出勾选的站点
-    checked_sitemaps = []
-    if config_sitemaps:
-        for i, url in enumerate(config_sitemaps):
-            if st.session_state.get("sitemap_checked", [True] * len(config_sitemaps))[i]:
-                checked_sitemaps.append(url)
+        for gi, (group_tab, group) in enumerate(zip(group_tabs, sitemap_groups)):
+            with group_tab:
+                group_urls = group.get("urls", [])
+                group_webhook = group.get("feishu_webhook", "")
 
-    checked_count = len(checked_sitemaps)
-    btn_label = f"🔍 立即检查（{checked_count}/{len(config_sitemaps)}）" if config_sitemaps else "🔍 立即检查"
-    start_sitemap = st.button(btn_label, type="primary", use_container_width=True,
-                               disabled=checked_count == 0)
+                # 分组设置
+                col_wh, col_del_group = st.columns([5, 1])
+                with col_wh:
+                    edited_webhook = st.text_input("飞书 Webhook", value=group_webhook,
+                                                     key=f"grp_webhook_{gi}", type="password")
+                    if edited_webhook != group_webhook:
+                        sitemap_groups[gi]["feishu_webhook"] = edited_webhook
+                        APP_CONFIG["sitemap_groups"] = sitemap_groups
+                        save_config(APP_CONFIG)
+                with col_del_group:
+                    st.markdown("")
+                    if st.button("🗑 删除分组", key=f"del_group_{gi}"):
+                        sitemap_groups.pop(gi)
+                        APP_CONFIG["sitemap_groups"] = sitemap_groups
+                        save_config(APP_CONFIG)
+                        st.rerun()
 
-    if start_sitemap and checked_sitemaps:
-        SITEMAP_DIR.mkdir(parents=True, exist_ok=True)
-        all_changes = {}
+                # 站点列表
+                if group_urls:
+                    for i, url in enumerate(group_urls):
+                        domain = urlparse(url).netloc
+                        has_cache = (SITEMAP_DIR / f"{domain}.json").exists()
+                        status = "✅" if has_cache else "🆕"
+                        col_url, col_del = st.columns([5, 0.8])
+                        with col_url:
+                            st.markdown(f"{status} `{url}`")
+                        with col_del:
+                            if st.button("🗑", key=f"del_sm_{gi}_{i}"):
+                                group_urls.pop(i)
+                                sitemap_groups[gi]["urls"] = group_urls
+                                APP_CONFIG["sitemap_groups"] = sitemap_groups
+                                save_config(APP_CONFIG)
+                                st.rerun()
+                else:
+                    st.caption("暂无站点")
 
-        progress_bar = st.progress(0, text="开始检查...")
-        total = len(checked_sitemaps)
+                # 添加站点
+                new_urls_input = st.text_area("添加 Sitemap URL（每行一个）",
+                                               placeholder="https://example.com/sitemap.xml",
+                                               height=80, key=f"add_sm_{gi}")
+                if st.button("➕ 添加", key=f"btn_add_sm_{gi}"):
+                    if new_urls_input.strip():
+                        added = 0
+                        for line in new_urls_input.strip().splitlines():
+                            url = line.strip()
+                            if not url:
+                                continue
+                            if not url.startswith("http"):
+                                url = "https://" + url
+                            if url not in group_urls:
+                                group_urls.append(url)
+                                added += 1
+                        if added > 0:
+                            sitemap_groups[gi]["urls"] = group_urls
+                            APP_CONFIG["sitemap_groups"] = sitemap_groups
+                            save_config(APP_CONFIG)
+                            st.success(f"已添加 {added} 个站点")
+                            st.rerun()
 
-        for i, url in enumerate(checked_sitemaps):
-            domain = urlparse(url).netloc
-            progress_bar.progress(i / total, text=f"检查 {domain}...")
+                st.divider()
 
-            try:
-                resp = http_requests.get(url, timeout=(10, 30), headers=SM_HEADERS)
-                resp.raise_for_status()
+                # 检查按钮
+                if st.button(f"🔍 检查「{group['name']}」（{len(group_urls)} 个站点）",
+                              type="primary", use_container_width=True,
+                              disabled=len(group_urls) == 0, key=f"check_grp_{gi}"):
 
-                new_urls = parse_sitemap_all_urls(resp.text)
+                    SITEMAP_DIR.mkdir(parents=True, exist_ok=True)
+                    all_changes = {}
+                    progress_bar = st.progress(0, text="开始检查...")
+                    total = len(group_urls)
 
-                # 读取旧快照（用 JSON 存 URL 列表，避免重复展开子 sitemap）
-                cache_file = SITEMAP_DIR / f"{domain}.json"
-                old_urls = set()
-                if cache_file.exists():
-                    old_urls = set(json.loads(cache_file.read_text(encoding='utf-8')))
+                    for i, url in enumerate(group_urls):
+                        domain = urlparse(url).netloc
+                        progress_bar.progress(i / total, text=f"检查 {domain}...")
+                        try:
+                            resp = http_requests.get(url, timeout=(10, 30), headers=SM_HEADERS)
+                            resp.raise_for_status()
+                            new_urls = parse_sitemap_all_urls(resp.text)
+                            cache_file = SITEMAP_DIR / f"{domain}.json"
+                            old_urls = set()
+                            if cache_file.exists():
+                                old_urls = set(json.loads(cache_file.read_text(encoding='utf-8')))
+                            added_urls = new_urls - old_urls
+                            if added_urls:
+                                all_changes[domain] = {
+                                    'new_urls': sorted(added_urls),
+                                    'total': len(new_urls),
+                                    'old_total': len(old_urls),
+                                }
+                            cache_file.write_text(json.dumps(sorted(new_urls), ensure_ascii=False), encoding='utf-8')
+                            st.caption(f"✅ {domain} — {len(new_urls)} 个 URL")
+                        except Exception as e:
+                            st.warning(f"⚠️ {domain} 跳过: {e}")
 
-                added = new_urls - old_urls
-                if added:
-                    all_changes[domain] = {
-                        'new_urls': sorted(added),
-                        'total': len(new_urls),
-                        'old_total': len(old_urls),
-                    }
+                    progress_bar.progress(1.0, text="检查完成！")
+                    st.divider()
 
-                # 保存 URL 列表
-                cache_file.write_text(json.dumps(sorted(new_urls), ensure_ascii=False), encoding='utf-8')
-                st.caption(f"✅ {domain} — {len(new_urls)} 个 URL")
+                    if all_changes:
+                        total_new = sum(len(v['new_urls']) for v in all_changes.values())
+                        st.subheader(f"🆕 发现 {total_new} 个新页面")
+                        for domain, info in all_changes.items():
+                            with st.expander(f"🌐 {domain}（{info['old_total']} → {info['total']}，+{len(info['new_urls'])}）", expanded=True):
+                                for u in info['new_urls']:
+                                    st.markdown(f"- {u}")
 
-            except Exception as e:
-                st.warning(f"⚠️ {domain} 跳过: {e}")
-
-        progress_bar.progress(1.0, text="检查完成！")
-
-        st.divider()
-
-        if all_changes:
-            total_new = sum(len(v['new_urls']) for v in all_changes.values())
-            st.subheader(f"🆕 发现 {total_new} 个新页面")
-
-            for domain, info in all_changes.items():
-                with st.expander(f"🌐 {domain}（{info['old_total']} → {info['total']}，+{len(info['new_urls'])}）", expanded=True):
-                    for u in info['new_urls']:
-                        st.markdown(f"- {u}")
-
-            # 飞书通知
-            notify = load_notify_config()
-            webhook = notify.get("feishu_webhook", "")
-            if webhook:
-                from datetime import timezone
-                BEIJING_TZ = timezone(timedelta(hours=8))
-                now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
-                content_lines = [
-                    [{"tag": "text", "text": f"📅 {now}\n{len(all_changes)} 个站点有更新，共 {total_new} 个新页面"}],
-                ]
-                for domain, info in all_changes.items():
-                    content_lines.append([{"tag": "text", "text": f"\n🌐 {domain}（{info['old_total']} → {info['total']}）:"}])
-                    for u in info['new_urls'][:20]:
-                        content_lines.append([{"tag": "text", "text": f"  {u}"}])
-                    if len(info['new_urls']) > 20:
-                        content_lines.append([{"tag": "text", "text": f"  ...等共 {len(info['new_urls'])} 个新 URL"}])
-
-                payload = {
-                    "msg_type": "post",
-                    "content": {"post": {"zh_cn": {
-                        "title": "🗺 Sitemap 监控报告",
-                        "content": content_lines,
-                    }}}
-                }
-                try:
-                    feishu_resp = http_requests.post(webhook, json=payload, timeout=10)
-                    if feishu_resp.status_code == 200:
-                        st.success("✅ 飞书通知已发送")
+                        # 飞书通知（用分组自己的 webhook，没有则用全局的）
+                        wh = edited_webhook or APP_CONFIG.get("notify", {}).get("feishu_webhook", "")
+                        if wh:
+                            now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
+                            content_lines = [
+                                [{"tag": "text", "text": f"📅 {now}\n【{group['name']}】{len(all_changes)} 个站点有更新，共 {total_new} 个新页面"}],
+                            ]
+                            for domain, info in all_changes.items():
+                                content_lines.append([{"tag": "text", "text": f"\n🌐 {domain}（{info['old_total']} → {info['total']}）:"}])
+                                for u in info['new_urls'][:20]:
+                                    content_lines.append([{"tag": "text", "text": f"  {u}"}])
+                                if len(info['new_urls']) > 20:
+                                    content_lines.append([{"tag": "text", "text": f"  ...等共 {len(info['new_urls'])} 个新 URL"}])
+                            payload = {
+                                "msg_type": "post",
+                                "content": {"post": {"zh_cn": {
+                                    "title": f"🗺 {group['name']} Sitemap 报告",
+                                    "content": content_lines,
+                                }}}
+                            }
+                            try:
+                                feishu_resp = http_requests.post(wh, json=payload, timeout=10)
+                                if feishu_resp.status_code == 200:
+                                    st.success("✅ 飞书通知已发送")
+                                else:
+                                    st.warning(f"⚠️ 飞书通知失败: {feishu_resp.status_code}")
+                            except Exception:
+                                st.warning("⚠️ 飞书通知发送异常")
                     else:
-                        st.warning(f"⚠️ 飞书通知失败: {feishu_resp.status_code}")
-                except Exception:
-                    st.warning("⚠️ 飞书通知发送异常")
-        else:
-            st.success("✅ 所有站点无变化")
+                        st.success("✅ 所有站点无变化")
 
 
 # ════════════════════════════════════════════════════════════════
