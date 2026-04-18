@@ -1254,40 +1254,50 @@ def _get_twitter_user_tweets(user_id, api_key, count=20):
 
 
 def _extract_tweets(raw_data):
-    """从 API 返回结构中提取推文列表 [{text, created_at, tweet_id}, ...]"""
+    """从 API 返回结构中提取推文列表 [{text, created_at, tweet_id}, ...]
+
+    兼容新旧两种 API 返回格式:
+      旧: result.timeline.timeline.instructions[].entries[]
+      新: result.timeline.instructions[].entry (单个)
+    """
     tweets = []
-    # 遍历 timeline 指令找到推文条目
-    instructions = (raw_data.get("result", raw_data)
-                    .get("timeline", {})
-                    .get("timeline", {})
-                    .get("instructions", []))
+    result_data = raw_data.get("result", raw_data)
+    timeline = result_data.get("timeline", {})
+    # 兼容新旧格式
+    instructions = timeline.get("timeline", timeline).get("instructions", [])
+
+    def _parse_entry(entry):
+        try:
+            content = entry.get("content", entry)
+            item_content = content.get("itemContent", {})
+            tweet_results = item_content.get("tweet_results", {}).get("result", {})
+            if not tweet_results:
+                return None
+            legacy = tweet_results.get("legacy", {})
+            note = (tweet_results.get("note_tweet", {})
+                    .get("note_tweet_results", {})
+                    .get("result", {})
+                    .get("text", ""))
+            text = note if note else legacy.get("full_text", "")
+            created_at = legacy.get("created_at", "")
+            tweet_id = legacy.get("id_str", entry.get("entryId", ""))
+            if text:
+                return {"text": text, "created_at": created_at, "tweet_id": tweet_id}
+        except (KeyError, TypeError, AttributeError):
+            pass
+        return None
+
     for inst in instructions:
-        entries = inst.get("entries", [])
-        for entry in entries:
-            try:
-                tweet_results = (entry.get("content", {})
-                                 .get("itemContent", {})
-                                 .get("tweet_results", {})
-                                 .get("result", {}))
-                if not tweet_results:
-                    continue
-                legacy = tweet_results.get("legacy", {})
-                # 优先取 note_tweet（长推文），否则取 legacy.full_text
-                note = (tweet_results.get("note_tweet", {})
-                        .get("note_tweet_results", {})
-                        .get("result", {})
-                        .get("text", ""))
-                text = note if note else legacy.get("full_text", "")
-                created_at = legacy.get("created_at", "")
-                tweet_id = legacy.get("id_str", entry.get("entryId", ""))
-                if text:
-                    tweets.append({
-                        "text": text,
-                        "created_at": created_at,
-                        "tweet_id": tweet_id,
-                    })
-            except (KeyError, TypeError, AttributeError):
-                continue
+        # 新格式: inst.entry（单个）
+        if "entry" in inst:
+            tw = _parse_entry(inst["entry"])
+            if tw:
+                tweets.append(tw)
+        # 旧格式: inst.entries[]（数组）
+        for entry in inst.get("entries", []):
+            tw = _parse_entry(entry)
+            if tw:
+                tweets.append(tw)
     return tweets
 
 

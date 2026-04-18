@@ -1153,37 +1153,47 @@ with tab4:
                     tweets_resp.raise_for_status()
                     raw = tweets_resp.json()
 
-                    # 解析推文
+                    # 解析推文（兼容新旧两种 API 返回格式）
                     tweets = []
-                    instructions = (raw.get("result", raw)
-                                    .get("timeline", {})
-                                    .get("timeline", {})
-                                    .get("instructions", []))
+                    result_data = raw.get("result", raw)
+                    timeline = result_data.get("timeline", {})
+                    # 旧格式: result.timeline.timeline.instructions
+                    # 新格式: result.timeline.instructions
+                    instructions = timeline.get("timeline", timeline).get("instructions", [])
+
+                    def _parse_entry(entry):
+                        """从单个 entry 中提取推文"""
+                        try:
+                            content = entry.get("content", entry)
+                            item_content = content.get("itemContent", {})
+                            tweet_results = item_content.get("tweet_results", {}).get("result", {})
+                            if not tweet_results:
+                                return None
+                            legacy = tweet_results.get("legacy", {})
+                            note = (tweet_results.get("note_tweet", {})
+                                    .get("note_tweet_results", {})
+                                    .get("result", {})
+                                    .get("text", ""))
+                            text = note if note else legacy.get("full_text", "")
+                            created_at = legacy.get("created_at", "")
+                            tweet_id = legacy.get("id_str", entry.get("entryId", ""))
+                            if text:
+                                return {"text": text, "created_at": created_at, "tweet_id": tweet_id}
+                        except (KeyError, TypeError, AttributeError):
+                            pass
+                        return None
+
                     for inst in instructions:
+                        # 新格式: inst.entry（单个）
+                        if "entry" in inst:
+                            tw = _parse_entry(inst["entry"])
+                            if tw:
+                                tweets.append(tw)
+                        # 旧格式: inst.entries[]（数组）
                         for entry in inst.get("entries", []):
-                            try:
-                                tweet_results = (entry.get("content", {})
-                                                 .get("itemContent", {})
-                                                 .get("tweet_results", {})
-                                                 .get("result", {}))
-                                if not tweet_results:
-                                    continue
-                                legacy = tweet_results.get("legacy", {})
-                                note = (tweet_results.get("note_tweet", {})
-                                        .get("note_tweet_results", {})
-                                        .get("result", {})
-                                        .get("text", ""))
-                                text = note if note else legacy.get("full_text", "")
-                                created_at = legacy.get("created_at", "")
-                                tweet_id = legacy.get("id_str", entry.get("entryId", ""))
-                                if text:
-                                    tweets.append({
-                                        "text": text,
-                                        "created_at": created_at,
-                                        "tweet_id": tweet_id,
-                                    })
-                            except (KeyError, TypeError, AttributeError):
-                                continue
+                            tw = _parse_entry(entry)
+                            if tw:
+                                tweets.append(tw)
 
                     # 加载已推送缓存
                     cache_file = TWITTER_CACHE_DIR / f"{username}.json"
