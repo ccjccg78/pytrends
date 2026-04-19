@@ -685,17 +685,8 @@ def _save_index_hash(domain, index_hash):
     meta_file.write_text(json.dumps({"index_hash": index_hash}), encoding='utf-8')
 
 
-def check_sitemaps(config):
-    """检查所有监控的 sitemap，返回各站点新增 URL
-
-    大站优化：对于缓存 > 1MB 的 sitemapindex 站点，先对比索引页哈希。
-    索引没变 = 子 sitemap 列表没变 = 跳过全量展开，节省大量时间和内存。
-    """
-    sitemap_urls = config.get("sitemap_urls", [])
-    if not sitemap_urls:
-        print("未配置 sitemap_urls，跳过")
-        return {}
-
+def _check_sitemap_urls(sitemap_urls):
+    """检查一组 sitemap URL，返回有变化的站点 {domain: {new_urls, total, old_total}}"""
     SITEMAP_DIR.mkdir(parents=True, exist_ok=True)
     all_changes = {}
 
@@ -707,45 +698,34 @@ def check_sitemaps(config):
         print(f"  📡 检查 {domain}{'（大站快速模式）' if is_large else ''}...")
 
         try:
-            # 第一步：下载主 sitemap/sitemapindex
             new_content = fetch_sitemap(url)
 
-            # 大站优化：如果是 sitemapindex 且缓存很大，先对比索引哈希
             if is_large:
                 sub_locs = _get_sub_sitemap_locs(new_content)
                 if sub_locs is not None:
-                    # 是 sitemapindex，计算子 sitemap 列表的哈希
                     index_hash = hashlib.md5("\n".join(sorted(sub_locs)).encode()).hexdigest()
                     old_hash = _load_index_hash(domain)
-
                     if index_hash == old_hash:
-                        # 索引没变，跳过全量展开
                         old_count = len(json.loads(cache_file.read_text(encoding='utf-8')))
                         print(f"    -> 索引未变化，跳过全量解析（缓存 {old_count} 个 URL）")
                         continue
-
-                    # 索引有变化，做全量展开
                     print(f"    -> 索引有变化（{len(sub_locs)} 个子sitemap），全量解析...")
                     _save_index_hash(domain, index_hash)
 
             new_urls = parse_sitemap_urls(new_content)
 
-            # 保存索引哈希（非大站首次也保存，为下次做准备）
             sub_locs = _get_sub_sitemap_locs(new_content)
             if sub_locs is not None:
                 index_hash = hashlib.md5("\n".join(sorted(sub_locs)).encode()).hexdigest()
                 _save_index_hash(domain, index_hash)
 
-            # 读取上次保存的 URL 列表
             old_urls = set()
             if cache_file.exists():
                 old_urls = set(json.loads(cache_file.read_text(encoding='utf-8')))
 
-            # 对比差异
             added = new_urls - old_urls
             if added:
                 if not old_urls:
-                    # 首次检测该站点，只保存基准数据，不推送通知（避免全量推送噪音）
                     print(f"    -> 首次检测，保存基准 {len(new_urls)} 个 URL（不推送通知）")
                 else:
                     all_changes[domain] = {
@@ -758,7 +738,6 @@ def check_sitemaps(config):
             else:
                 print(f"    -> 无变化（共 {len(new_urls)} 个 URL）")
 
-            # 保存 URL 列表
             cache_file.write_text(json.dumps(sorted(new_urls), ensure_ascii=False), encoding='utf-8')
 
         except Exception as e:
@@ -767,13 +746,59 @@ def check_sitemaps(config):
     return all_changes
 
 
-def send_sitemap_feishu(webhook_url, all_changes):
+def check_sitemaps_by_group(config):
+    """按分组检查 sitemap，每组独立推送飞书
+
+    支持两种配置格式:
+      新格式: sitemap_groups: [{name, feishu_webhook, urls}, ...]
+      旧格式: sitemap_urls: [...]（兼容，当作单个分组）
+    """
+    groups = config.get("sitemap_groups", [])
+
+    # 兼容旧配置
+    if not groups and "sitemap_urls" in config:
+        groups = [{
+            "name": "默认",
+            "feishu_webhook": config.get("notify", {}).get("feishu_webhook", ""),
+            "urls": config.get("sitemap_urls", []),
+        }]
+
+    if not groups:
+        print("未配置 sitemap_groups，跳过")
+        return
+
+    default_webhook = config.get("notify", {}).get("feishu_webhook", "")
+
+    for group in groups:
+        group_name = group.get("name", "未命名")
+        group_urls = group.get("urls", [])
+        group_webhook = group.get("feishu_webhook", "") or default_webhook
+
+        if not group_urls:
+            print(f"\n📂 [{group_name}] 无站点，跳过")
+            continue
+
+        print(f"\n📂 [{group_name}] 检查 {len(group_urls)} 个站点...")
+        all_changes = _check_sitemap_urls(group_urls)
+
+        if all_changes:
+            total_new = sum(len(v['new_urls']) for v in all_changes.values())
+            print(f"  📊 [{group_name}] {len(all_changes)} 个站点有更新，共 {total_new} 个新 URL")
+
+            if group_webhook:
+                print(f"  📮 [{group_name}] 推送飞书...")
+                send_sitemap_feishu(group_webhook, all_changes, group_name)
+        else:
+            print(f"  ✅ [{group_name}] 所有站点无变化")
+
+
+def send_sitemap_feishu(webhook_url, all_changes, group_name=""):
     """推送 sitemap 变化到飞书"""
     now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
 
     total_new = sum(len(v['new_urls']) for v in all_changes.values())
     content_lines = [
-        [{"tag": "text", "text": f"📅 {now}\n监控 {len(all_changes)} 个站点有更新，共 {total_new} 个新页面"}],
+        [{"tag": "text", "text": f"📅 {now}\n{len(all_changes)} 个站点有更新，共 {total_new} 个新页面"}],
     ]
 
     for domain, info in all_changes.items():
@@ -783,10 +808,11 @@ def send_sitemap_feishu(webhook_url, all_changes):
         if len(info['new_urls']) > 20:
             content_lines.append([{"tag": "text", "text": f"  ...等共 {len(info['new_urls'])} 个新 URL"}])
 
+    title = f"🗺 {group_name} Sitemap 报告" if group_name else "🗺 Sitemap 监控报告"
     payload = {
         "msg_type": "post",
         "content": {"post": {"zh_cn": {
-            "title": "🗺 Sitemap 监控报告",
+            "title": title,
             "content": content_lines,
         }}}
     }
@@ -794,11 +820,11 @@ def send_sitemap_feishu(webhook_url, all_changes):
     try:
         resp = http_requests.post(webhook_url, json=payload, timeout=10)
         if resp.status_code == 200:
-            print("✅ 飞书 Sitemap 通知发送成功")
+            print(f"  ✅ 飞书通知发送成功 [{group_name}]")
         else:
-            print(f"❌ 飞书通知失败: {resp.status_code} {resp.text}")
+            print(f"  ❌ 飞书通知失败: {resp.status_code} {resp.text}")
     except Exception as e:
-        print(f"❌ 飞书通知异常: {e}")
+        print(f"  ❌ 飞书通知异常: {e}")
 
 
 # ── AI 平台监控 ─────────────────────────────────────────────────
@@ -2051,19 +2077,12 @@ def main():
         print(f"\n✅ 完成! 共 {len(combined)} 个上升词")
 
     elif args.mode == 'sitemap':
-        # Sitemap 监控
-        sitemap_urls = config.get("sitemap_urls", [])
-        print(f"\n🗺 开始检查 {len(sitemap_urls)} 个 Sitemap...")
-        all_changes = check_sitemaps(config)
-
-        if all_changes:
-            total_new = sum(len(v['new_urls']) for v in all_changes.values())
-            if webhook:
-                print("\n📮 发送飞书通知...")
-                send_sitemap_feishu(webhook, all_changes)
-            print(f"\n✅ 完成! {len(all_changes)} 个站点有更新，共 {total_new} 个新 URL")
-        else:
-            print("✅ 所有站点无变化")
+        # Sitemap 监控（按分组，各自推送独立飞书 webhook）
+        groups = config.get("sitemap_groups", [])
+        total_sites = sum(len(g.get("urls", [])) for g in groups)
+        print(f"\n🗺 开始检查 {len(groups)} 个分组，共 {total_sites} 个站点...")
+        check_sitemaps_by_group(config)
+        print(f"\n✅ Sitemap 检查完成")
 
     elif args.mode == 'twitter':
         # Twitter 监控
