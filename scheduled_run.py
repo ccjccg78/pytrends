@@ -390,27 +390,24 @@ def send_trending_feishu(webhook_url, all_results):
 
 
 # ── 爆增词采集 ────────────────────────────────────────────────
-def fetch_rising_queries(config):
-    """抓取所有关键词的 rising queries"""
-    kw_list = [kw.strip() for kw in config["keywords"] if kw.strip()]
+def _fetch_rising_group(kw_list, config, group_offset=0):
+    """抓取一组关键词的 rising queries"""
     geo = config.get("geo", "")
     cat = config.get("category", 0)
     timeframe = config.get("timeframe", "now 7-d")
     interval = config.get("request_interval", 50)
 
-    proxies = _load_proxies(config)
-    if proxies:
-        print(f"  🔀 已加载 {len(proxies)} 个代理")
-
     all_rising = []
     failed = []
     effective_interval = interval
     consecutive_429 = 0
+    total = len(kw_list)
 
     pytrend = _create_pytrend(config)
 
     for i, kw in enumerate(kw_list):
-        print(f"[{i+1}/{len(kw_list)}] 查询: {kw}")
+        global_idx = group_offset + i + 1
+        print(f"[{global_idx}] 查询: {kw}")
 
         # 每 10 个词轮换会话
         if i > 0 and i % 10 == 0:
@@ -450,7 +447,6 @@ def fetch_rising_queries(config):
                 retry_count += 1
                 consecutive_429 += 1
 
-                # 指数退避
                 base_wait = min(60 * (2 ** (retry_count - 1)), 600)
                 extra_wait = min(consecutive_429 * 30, 300)
                 wait = base_wait + extra_wait + random.randint(0, 30)
@@ -460,7 +456,6 @@ def fetch_rising_queries(config):
                 time.sleep(wait)
                 pytrend = _create_pytrend(config, proxy_index=i + retry_count)
 
-                # 连续 5 次 429，长时间冷却
                 if consecutive_429 >= 5:
                     cooldown = random.uniform(10 * 60, 15 * 60)
                     print(f"    🧊 连续 {consecutive_429} 次 429，冷却 {cooldown/60:.0f} 分钟...")
@@ -470,10 +465,74 @@ def fetch_rising_queries(config):
             failed.append(kw)
             print(f"  ❌ 重试耗尽，跳过")
 
-        if i < len(kw_list) - 1:
-            _smart_sleep(effective_interval, i, len(kw_list))
+        if i < total - 1:
+            _smart_sleep(effective_interval, i, total)
 
     return all_rising, failed
+
+
+def fetch_rising_queries(config):
+    """分组抓取所有关键词的 rising queries
+
+    将词根分成 5 组，每组跑完后：
+      1. 分析趋势 + 推送飞书
+      2. 休息 30 分钟冷却 IP
+    """
+    import math
+
+    kw_list = [kw.strip() for kw in config["keywords"] if kw.strip()]
+    # 过滤掉注释行（以 __ 开头）
+    kw_list = [kw for kw in kw_list if not kw.startswith("__")]
+
+    NUM_GROUPS = 5
+    group_size = math.ceil(len(kw_list) / NUM_GROUPS)
+    groups = [kw_list[i:i+group_size] for i in range(0, len(kw_list), group_size)]
+    GROUP_REST = 30 * 60  # 组间休息 30 分钟
+
+    proxies = _load_proxies(config)
+    if proxies:
+        print(f"  🔀 已加载 {len(proxies)} 个代理")
+
+    print(f"\n📋 共 {len(kw_list)} 个词根，分 {len(groups)} 组（每组约 {group_size} 个），组间休息 30 分钟")
+
+    webhook = config.get("notify", {}).get("feishu_webhook", "")
+    all_rising = []
+    all_failed = []
+
+    for gi, group_kws in enumerate(groups):
+        group_num = gi + 1
+        group_offset = gi * group_size
+        print(f"\n{'='*50}")
+        print(f"📂 第 {group_num}/{len(groups)} 组（{len(group_kws)} 个词根）")
+        print(f"{'='*50}")
+
+        group_rising, group_failed = _fetch_rising_group(group_kws, config, group_offset)
+        all_rising.extend(group_rising)
+        all_failed.extend(group_failed)
+
+        # 每组跑完，分析并推送飞书
+        if group_rising:
+            print(f"\n📊 第 {group_num} 组分析趋势...")
+            combined, spike_results = analyze_spikes(group_rising, config)
+
+            if webhook and not combined.empty:
+                print(f"📮 第 {group_num} 组推送飞书...")
+                send_rising_feishu(webhook, combined, spike_results, group_failed,
+                                    title=f"🔍 爆增词追踪 第{group_num}/{len(groups)}组")
+
+            rising_count = len(combined) if not isinstance(combined, list) else 0
+            print(f"✅ 第 {group_num} 组完成！{rising_count} 个上升词，已推飞书")
+        else:
+            print(f"⚠️ 第 {group_num} 组未找到上升词")
+
+        # 组间休息 30 分钟（最后一组不用休息）
+        if gi < len(groups) - 1:
+            rest_min = GROUP_REST / 60
+            print(f"\n⏸ 组间休息 {rest_min:.0f} 分钟，冷却 IP...")
+            time.sleep(GROUP_REST)
+            print(f"🔄 休息结束，开始第 {group_num + 1} 组")
+
+    return all_rising, all_failed
 
 
 def analyze_spikes(all_rising, config):
@@ -543,7 +602,7 @@ def analyze_spikes(all_rising, config):
     return combined, spike_results
 
 
-def send_rising_feishu(webhook_url, combined, spike_results, failed):
+def send_rising_feishu(webhook_url, combined, spike_results, failed, title="🔍 爆增词追踪报告"):
     """发送爆增词飞书通知"""
     import pandas as pd
     now = datetime.now(BEIJING_TZ).strftime("%Y-%m-%d %H:%M")
@@ -590,7 +649,7 @@ def send_rising_feishu(webhook_url, combined, spike_results, failed):
     payload = {
         "msg_type": "post",
         "content": {"post": {"zh_cn": {
-            "title": "🔍 爆增词追踪报告",
+            "title": title,
             "content": content_lines,
         }}}
     }
@@ -2059,22 +2118,23 @@ def main():
             print("❌ 未获取到任何数据")
 
     elif args.mode == 'rising':
-        # 爆增词追踪
+        # 爆增词追踪（分 5 组，每组跑完推飞书，组间休息 30 分钟）
         print("\n📡 开始抓取 rising queries...")
         all_rising, failed = fetch_rising_queries(config)
 
-        if not all_rising:
+        # 最终汇总推送
+        if all_rising:
+            print("\n📊 最终汇总分析...")
+            combined, spike_results = analyze_spikes(all_rising, config)
+
+            if webhook:
+                print("\n📮 发送最终汇总飞书...")
+                send_rising_feishu(webhook, combined, spike_results, failed,
+                                    title="🔍 爆增词追踪 最终汇总")
+
+            print(f"\n✅ 全部完成! 共 {len(combined)} 个上升词")
+        else:
             print("❌ 未获取到任何数据")
-            return
-
-        print("\n📊 分析趋势...")
-        combined, spike_results = analyze_spikes(all_rising, config)
-
-        if webhook:
-            print("\n📮 发送飞书通知...")
-            send_rising_feishu(webhook, combined, spike_results, failed)
-
-        print(f"\n✅ 完成! 共 {len(combined)} 个上升词")
 
     elif args.mode == 'sitemap':
         # Sitemap 监控（按分组，各自推送独立飞书 webhook）
