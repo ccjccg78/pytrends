@@ -192,10 +192,94 @@ def get_all_exclude_words(config=None):
     return all_words
 
 
+# 常见英文名字（用于检测"FirstName LastName"型人名查询）
+COMMON_FIRST_NAMES = {
+    # 政商科技
+    "elon", "mark", "jeff", "bill", "steve", "tim", "satya", "sundar", "sam", "warren",
+    "jensen", "lisa", "dario", "demis",
+    "joe", "donald", "kamala", "barack", "hillary", "ron", "mitch", "nancy", "chuck",
+    "vladimir", "narendra", "boris", "rishi", "emmanuel", "olaf", "justin", "anthony",
+    "marco", "vivek", "tucker", "kanye", "graham",
+    # 体育/娱乐常见名
+    "lebron", "stephen", "kevin", "michael", "kobe", "shaquille", "tom", "patrick",
+    "taylor", "beyonce", "rihanna", "ariana", "selena", "miley", "drake", "jay",
+    # 通用最常见英文名
+    "james", "mary", "john", "robert", "patricia", "jennifer", "william", "linda",
+    "david", "elizabeth", "richard", "susan", "joseph", "jessica", "thomas", "sarah",
+    "charles", "karen", "christopher", "daniel", "matthew", "betty",
+    "sandra", "ashley", "kimberly", "paul", "donna",
+    "steven", "carol", "andrew", "michelle", "kenneth", "amanda", "george", "melissa",
+    "brian", "deborah", "edward", "stephanie", "ronald", "rebecca", "timothy", "laura",
+    "jason", "sharon", "jeffrey", "cynthia", "ryan", "kathleen", "jacob", "amy",
+    "gary", "shirley", "nicholas", "angela", "eric", "helen", "jonathan", "anna",
+    "larry", "pamela", "scott", "samantha",
+    "brandon", "katherine", "benjamin", "christine", "samuel", "emma", "frank", "olivia",
+    "gregory", "rachel", "raymond", "carolyn", "alexander", "janet", "virginia",
+    "jack", "maria", "dennis", "heather", "jerry", "diane", "tyler", "ruth", "aaron",
+    "julie", "henry", "joyce", "jose", "victoria", "douglas", "kelly", "peter",
+    "noah", "joan", "ethan", "evelyn", "logan", "lauren", "lucas", "judith",
+    "megan", "oliver", "elijah", "andrea", "owen", "hannah", "abigail",
+    "liam", "mason", "harper", "isabella", "sophia", "mia", "amelia", "charlotte",
+}
+
+# 不视为姓氏的常见英文词（避免"olive garden"、"graham crackers"误判为人名）
+COMMON_NON_SURNAME_WORDS = {
+    # 工具/技术
+    "app", "apps", "tool", "tools", "ai", "gpt", "bot", "bots", "service", "services",
+    "generator", "calculator", "converter", "checker", "tracker", "finder", "builder",
+    "maker", "editor", "viewer", "reader", "scanner", "manager", "downloader",
+    "extension", "plugin", "addon", "addons", "api", "sdk", "cli", "ide",
+    "model", "models", "engine", "parser", "compiler", "framework", "library",
+    # 信息/媒体
+    "news", "update", "updates", "guide", "tutorial", "review", "reviews", "tips",
+    "wiki", "blog", "post", "posts", "article", "video", "videos", "podcast",
+    "movie", "film", "show", "song", "album", "photo", "image", "images",
+    # 商业/金融
+    "price", "prices", "stock", "stocks", "currency", "rate", "rates", "exchange",
+    "market", "swap", "unit", "units", "fund", "funds", "etf", "crypto", "coin",
+    # 生活/场所
+    "garden", "kitchen", "bedroom", "office", "store", "shop", "mall",
+    "restaurant", "hotel", "cafe", "club", "gym", "school", "university",
+    "factory", "company", "group", "team", "league", "depot",
+    "recipe", "menu", "food", "drink", "coffee", "tea", "pizza", "burger",
+    "italian", "chinese", "mexican", "indian", "japanese", "korean", "thai",
+    # 通用产品词
+    "alternative", "free", "online", "download", "login", "signup", "support",
+    "help", "tips", "hack", "hacks", "mod", "mods", "cheat", "cheats",
+    "crackers", "cookies", "cake", "bread", "soup", "salad",
+    "response", "responses", "report", "reports", "list", "lists",
+}
+
+
+def looks_like_person_name(text):
+    """检测是否为'FirstName LastName'型人名查询。
+
+    规则：恰好 2 个纯字母 token；第一个是常见英文名；第二个非常见英文词且长度 >=4。
+    """
+    tokens = text.lower().strip().split()
+    if len(tokens) != 2:
+        return False
+    first, last = tokens
+    if not (first.replace("-", "").replace("'", "").isalpha() and
+            last.replace("-", "").replace("'", "").isalpha()):
+        return False
+    if first not in COMMON_FIRST_NAMES:
+        return False
+    if last in COMMON_NON_SURNAME_WORDS:
+        return False
+    if len(last) < 4:
+        return False
+    return True
+
+
 def is_excluded(text, config=None):
     text_lower = text.lower()
     for ex in get_all_exclude_words(config):
         if ex in text_lower:
+            return True
+    # 人名过滤（默认开启，可在 config 设 "filter_person_names": false 关闭）
+    if config is None or config.get("filter_person_names", True):
+        if looks_like_person_name(text_lower):
             return True
     return False
 
@@ -578,9 +662,24 @@ def analyze_spikes(all_rising, config):
                         split = max(1, len(series) * 2 // 3)
                         early_avg = np.mean(series[:split])
                         late_avg = np.mean(series[split:])
-                        peak_in_late = np.argmax(series) >= split
+                        peak_idx = int(np.argmax(series))
+                        peak_val = float(series[peak_idx])
+                        peak_in_late = peak_idx >= split
 
-                        if early_avg < 1:
+                        # 最近 1 天均值（7 天序列约 168 点 → 取最后 1/7）
+                        recent_window = max(1, len(series) // 7)
+                        recent_avg = float(np.mean(series[-recent_window:]))
+
+                        # 昙花一现：曾经飙升但已回落到接近 0（峰值不在最近 1 天内）
+                        is_transient = (
+                            peak_val >= 30 and
+                            recent_avg < min(5.0, peak_val * 0.15) and
+                            peak_idx < len(series) - recent_window
+                        )
+
+                        if is_transient:
+                            pattern = '已回落'
+                        elif early_avg < 1:
                             pattern = '新词飙升'
                         elif late_avg > early_avg * 2 and peak_in_late:
                             pattern = '近日飙升'
@@ -930,6 +1029,92 @@ def _ai_filter(text, keywords):
     return any(kw.lower() in text_lower for kw in keywords)
 
 
+# ── 新词组检测（仅过滤英文条目；中文条目不过滤） ──────────────────
+SEEN_PHRASES_FILE = AI_MONITOR_CACHE_DIR / "_seen_phrases.json"
+TWITTER_SEEN_PHRASES_FILE = Path(__file__).parent / "output" / "twitter" / "_seen_phrases.json"
+
+# 不算"新词组"的常见英文词（即便首字母大写也忽略）
+COMMON_TITLE_WORDS = {
+    "a", "an", "the", "and", "or", "but", "of", "in", "on", "at", "to", "for",
+    "with", "by", "from", "as", "is", "are", "was", "were", "be", "been", "being",
+    "have", "has", "had", "do", "does", "did", "this", "that", "these", "those",
+    "it", "its", "we", "you", "they", "he", "she", "i", "my", "your", "his",
+    "her", "our", "their", "via", "into", "than", "then", "so", "such", "no",
+    "not", "any", "all", "more", "most", "other", "another", "each", "every",
+    "few", "many", "much", "very", "too", "also", "just", "only", "ever", "never",
+    "always", "often", "up", "down", "out", "over", "again", "here", "there",
+    "where", "when", "why", "how", "what", "which", "who", "whom", "whose",
+    "about", "against", "between", "through", "during", "before", "after",
+    "above", "below", "around", "near", "without", "within", "while", "until",
+    "show", "hn", "ask", "tell",
+    "new", "old", "good", "best", "worst", "big", "small", "fast", "slow",
+    "high", "low", "first", "last", "next", "main", "key", "real", "true",
+    # 学术常见但不算新名词
+    "survey", "review", "report", "study", "analysis", "approach", "method",
+    "methods", "framework", "system", "systems", "paper", "papers", "research",
+    "results", "experiment", "experiments", "introduction", "conclusion",
+    "discussion", "abstract", "summary", "overview", "tutorial", "guide",
+    "towards", "using", "based", "learning", "evaluation",
+}
+
+
+def has_chinese(text):
+    """判断文本是否包含中文字符"""
+    return any('一' <= c <= '鿿' for c in text or "")
+
+
+def extract_phrases(text):
+    """从英文文本提取候选'词组'：连续的大写词（含连字符/混合大小写/缩写），跳过停用词。
+
+    返回小写化后的短语集合。
+    """
+    if not text:
+        return set()
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9\-']*", text)
+    phrases = set()
+    current = []
+
+    def _flush():
+        if current:
+            phrases.add(' '.join(current).lower())
+            current.clear()
+
+    for tok in tokens:
+        low = tok.lower()
+        if low in COMMON_TITLE_WORDS:
+            _flush()
+            continue
+        is_acronym = len(tok) >= 2 and tok.isupper() and any(c.isalpha() for c in tok)
+        is_capitalized = tok[0].isupper() and len(tok) >= 3
+        is_hyphenated = '-' in tok and len(tok) >= 4
+        is_mixedcase = (any(c.isupper() for c in tok[1:]) and
+                        any(c.islower() for c in tok))
+        if is_acronym or is_capitalized or is_hyphenated or is_mixedcase:
+            current.append(tok)
+        else:
+            _flush()
+    _flush()
+    return {p for p in phrases if len(p) >= 3 and not p.replace(' ', '').isdigit()}
+
+
+def _load_seen_phrases(cache_file):
+    if cache_file.exists():
+        try:
+            return set(json.loads(cache_file.read_text(encoding="utf-8")))
+        except Exception:
+            return set()
+    return set()
+
+
+def _save_seen_phrases(cache_file, seen):
+    cache_file.parent.mkdir(parents=True, exist_ok=True)
+    # 防止无限增长，最多保留 50000 条
+    if len(seen) > 50000:
+        seen = set(sorted(seen)[-50000:])
+    cache_file.write_text(json.dumps(sorted(seen), ensure_ascii=False),
+                          encoding="utf-8")
+
+
 def _fetch_huggingface(ai_config):
     """采集 Hugging Face 热门模型/Spaces"""
     limit = ai_config.get("huggingface_limit", 30)
@@ -1225,6 +1410,21 @@ _AI_FETCHERS = {
 }
 
 
+def _ai_item_text(platform, item):
+    """从条目提取用于新词组检测的文本"""
+    if platform == "huggingface":
+        return item.get("title", "") or item.get("id", "")
+    if platform == "arxiv":
+        return item.get("title", "")
+    if platform == "producthunt":
+        return f"{item.get('title', '')} {item.get('tagline', '')}"
+    if platform == "github":
+        return f"{item.get('repo', '')} {item.get('description', '')}"
+    if platform == "hackernews":
+        return item.get("title", "")
+    return item.get("title", "") or str(item)
+
+
 def fetch_ai_monitor(config):
     """采集所有启用的 AI 平台，返回 {platform: [items]}"""
     ai_config = config.get("ai_monitor", {})
@@ -1242,6 +1442,35 @@ def fetch_ai_monitor(config):
         if items:
             all_results[platform] = items
         time.sleep(2)  # 平台之间间隔
+
+    # 新词组过滤：英文条目仅保留含新词组的（中文条目不过滤）
+    if ai_config.get("filter_new_phrases", True) and all_results:
+        seen = _load_seen_phrases(SEEN_PHRASES_FILE)
+        bootstrap = len(seen) < 50
+        if bootstrap:
+            print(f"  ℹ️ 新词组库冷启动（已见 {len(seen)} 个），本次不过滤，累积词库中")
+        for platform, items in list(all_results.items()):
+            before = len(items)
+            kept = []
+            for item in items:
+                text = _ai_item_text(platform, item) or ""
+                if has_chinese(text):
+                    kept.append(item)
+                    seen |= extract_phrases(text)
+                    continue
+                candidates = extract_phrases(text)
+                if not candidates:
+                    kept.append(item)
+                    continue
+                if bootstrap or (candidates - seen):
+                    kept.append(item)
+                seen |= candidates
+            all_results[platform] = kept
+            dropped = before - len(kept)
+            if dropped > 0:
+                print(f"  🔍 {platform}: 过滤 {dropped} 个无新词组的英文条目")
+        _save_seen_phrases(SEEN_PHRASES_FILE, seen)
+        all_results = {p: it for p, it in all_results.items() if it}
 
     return all_results
 
@@ -1420,6 +1649,13 @@ def fetch_twitter(config):
     TWITTER_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     all_new_tweets = {}  # {username: [tweet, ...]}
 
+    # 新词组过滤设置（英文推文仅推含新词组的；中文推文不过滤）
+    filter_new = tw_config.get("filter_new_phrases", True)
+    seen_phrases = _load_seen_phrases(TWITTER_SEEN_PHRASES_FILE) if filter_new else set()
+    tw_bootstrap = filter_new and len(seen_phrases) < 50
+    if tw_bootstrap:
+        print(f"  ℹ️ Twitter 新词组库冷启动（已见 {len(seen_phrases)} 个），本次不过滤")
+
     for username in accounts:
         print(f"  📡 采集 @{username}...")
         retry_count = 0
@@ -1440,6 +1676,7 @@ def fetch_twitter(config):
                 seen = _load_seen_tweets(username)
 
                 new_tweets = []
+                dropped_no_new = 0
                 for tw in tweets:
                     if tw["tweet_id"] in seen:
                         continue
@@ -1447,10 +1684,23 @@ def fetch_twitter(config):
                         text_lower = tw["text"].lower()
                         if not any(kw in text_lower for kw in filter_kw):
                             continue
+                    if filter_new and not has_chinese(tw["text"]):
+                        candidates = extract_phrases(tw["text"])
+                        if candidates:
+                            if not tw_bootstrap and not (candidates - seen_phrases):
+                                seen_phrases |= candidates
+                                seen.add(tw["tweet_id"])
+                                dropped_no_new += 1
+                                continue
+                            seen_phrases |= candidates
+                    elif filter_new:
+                        seen_phrases |= extract_phrases(tw["text"])
                     new_tweets.append(tw)
                     seen.add(tw["tweet_id"])
 
                 _save_seen_tweets(username, seen)
+                if dropped_no_new:
+                    print(f"    🔍 过滤 {dropped_no_new} 条无新词组的英文推文")
 
                 if new_tweets:
                     all_new_tweets[username] = new_tweets
@@ -1473,6 +1723,9 @@ def fetch_twitter(config):
             print(f"    ❌ 重试耗尽，跳过")
 
         time.sleep(120)  # 账号之间间隔 120 秒
+
+    if filter_new:
+        _save_seen_phrases(TWITTER_SEEN_PHRASES_FILE, seen_phrases)
 
     return all_new_tweets
 
